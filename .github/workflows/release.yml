@@ -1,0 +1,34 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust version Rune needs
+        working-directory: gui
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui
+      - name: Build
+        working-directory: gui
+        run: cargo build --release
+      - name: Checksum
+        shell: pwsh
+        run: |
+          Copy-Item gui/target/release/tast2controller.exe tast2controller.exe
+          $h = (Get-FileHash tast2controller.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  tast2controller.exe" | Out-File -Encoding ascii tast2controller.exe.sha256
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" tast2controller.exe tast2controller.exe.sha256 --title "${{ github.ref_name }}" --notes "Unsigned Windows build. Verify the SHA-256 in the .sha256 file. Early development: not yet tested on a real PS5. Use only in story/offline games."
