@@ -1,14 +1,19 @@
-//! Settings window for Tast2ControllerRust: connection status, start/stop, profile and mouse tuning.
-//! Built with Rune like the Schmidhome desktop app. Windows only (input capture is Windows only).
+//! tast2controller: keyboard and mouse as a DualSense for a PS5 (Remote Play, input only).
+//! One program: without arguments it opens the settings window (Rune, like the Schmidhome
+//! desktop app); with arguments it is the command line (`tast2controller --help`).
 
-#[cfg(not(windows))]
 fn main() {
-    eprintln!("the settings window is only available on Windows");
-}
-
-#[cfg(windows)]
-fn main() {
-    ui::run();
+    if std::env::args().len() > 1 {
+        tast2controller::cli::main();
+        return;
+    }
+    #[cfg(windows)]
+    {
+        tast2controller::cli::detach_own_console();
+        ui::run();
+    }
+    #[cfg(not(windows))]
+    eprintln!("the settings window is only available on Windows; try `tast2controller --help`");
 }
 
 #[cfg(windows)]
@@ -18,11 +23,21 @@ mod ui {
     use std::time::Duration;
 
     use rune::tok::{self, Theme, type_};
-    use rune::{App, AppHandle, AppSpec, Color, Cx, El, col, row, text};
-    use tast2controller::config::Config;
+    use rune::{App, AppHandle, AppSpec, Color, Cx, El, TextEdit, col, row, text, text_input};
+    use tast2controller::config::{Binding, Config, MouseTarget};
+    use tast2controller::input::mapper::Mapper;
     use tast2controller::runner::{CaptureIn, Runner};
+    use tast2controller::{cli, psn, regist, resolve_host};
+    use tast2controller_input::MouseConfig;
 
     static HANDLE: OnceLock<AppHandle<State>> = OnceLock::new();
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Tab {
+        Connect,
+        Keys,
+        Mouse,
+    }
 
     struct State {
         path: PathBuf,
@@ -30,28 +45,48 @@ mod ui {
         runner: Option<Runner>,
         status: String,
         message: String,
-    }
-
-    fn config_path() -> PathBuf {
-        let name = "tast2controller.toml";
-        let cwd = PathBuf::from(name);
-        if cwd.exists() {
-            return cwd;
-        }
-        match std::env::var_os("APPDATA") {
-            Some(dir) => PathBuf::from(dir).join("tast2controller").join(name),
-            None => cwd,
-        }
+        tab: Tab,
+        /// Profile shown on the Keys and Mouse tabs.
+        sel: usize,
+        // pairing
+        redirect: TextEdit,
+        account: Option<u64>,
+        host: TextEdit,
+        pin: TextEdit,
+        busy: bool,
+        // new binding
+        bind_input: TextEdit,
+        bind_action: TextEdit,
     }
 
     impl Default for State {
         fn default() -> Self {
-            let path = config_path();
-            let (cfg, message) = match Config::load(&path) {
-                Ok(c) => (c, String::new()),
-                Err(e) => (Config::default_config(), format!("Config nicht geladen: {e:#}")),
+            let path = cli::default_config_path();
+            let (cfg, message) = if path.exists() {
+                match Config::load(&path) {
+                    Ok(c) => (c, String::new()),
+                    Err(e) => (Config::default_config(), format!("Config nicht geladen: {e:#}")),
+                }
+            } else {
+                (Config::default_config(), "Noch keine Config: zuerst die PS5 koppeln.".into())
             };
-            State { path, cfg, runner: None, status: "Nicht verbunden".into(), message }
+            let host = TextEdit::new(cfg.console.host.clone());
+            State {
+                path,
+                cfg,
+                runner: None,
+                status: "Nicht verbunden".into(),
+                message,
+                tab: Tab::Connect,
+                sel: 0,
+                redirect: TextEdit::new(""),
+                account: None,
+                host,
+                pin: TextEdit::new(""),
+                busy: false,
+                bind_input: TextEdit::new(""),
+                bind_action: TextEdit::new(""),
+            }
         }
     }
 
@@ -67,17 +102,30 @@ mod ui {
             .on_press(on)
     }
 
-    /// One tunable number with minus and plus buttons.
-    fn stepper(label: &str, key: &str, value: f32, t: Theme, down: fn(&mut State), up: fn(&mut State)) -> El {
-        row().gap(10.0).center_y()
-            .child(text(label.to_string()).font(type_::LABEL).color(t.text_secondary).w(130.0))
-            .child(button("−", &format!("{key}-down"), t, false, down))
-            .child(text(format!("{value:.2}")).font(type_::LABEL).color(t.text).w(60.0))
-            .child(button("+", &format!("{key}-up"), t, false, up))
+    fn chip(label: &str, key: String, on_state: bool, t: Theme, on: impl Fn(&mut State) + 'static) -> El {
+        row().key(key).h(30.0).px(14.0).radius(8.0).center_y()
+            .fill(if on_state { accent() } else { t.card }).border(1.0, t.card_border)
+            .child(text(label.to_string()).font(type_::LABEL).color(if on_state { Color::WHITE } else { t.text }))
+            .on_press(on)
     }
 
-    fn nudge(s: &mut State, f: impl Fn(&mut tast2controller_input::MouseConfig)) {
-        if let Some(p) = s.cfg.profiles.first_mut() {
+    fn card(key: &str, t: Theme) -> El {
+        col().key(key.to_string()).gap(10.0).padding(16.0).radius(12.0).fill(t.card).border(1.0, t.card_border)
+    }
+
+    fn field(key: &'static str, value: &TextEdit, hint: &str, t: Theme, f: fn(&mut State) -> &mut TextEdit) -> El {
+        row().h(38.0).px(12.0).center_y().radius(10.0).fill(t.control_off).grow(1.0)
+            .child(text_input(value, type_::BODY).key(key).single_line().grow(1.0).color(t.text)
+                .placeholder(hint, t.text_secondary).on_edit(f))
+    }
+
+    fn sel_index(s: &State) -> usize {
+        s.sel.min(s.cfg.profiles.len().saturating_sub(1))
+    }
+
+    fn nudge(s: &mut State, f: impl Fn(&mut MouseConfig)) {
+        let i = sel_index(s);
+        if let Some(p) = s.cfg.profiles.get_mut(i) {
             f(&mut p.mouse.engine);
             p.mouse.engine = p.mouse.engine.clone().sanitized();
         }
@@ -92,6 +140,10 @@ mod ui {
 
     fn start(s: &mut State) {
         if s.runner.is_some() {
+            return;
+        }
+        if let Err(e) = s.cfg.credentials() {
+            s.message = format!("{e:#}");
             return;
         }
         match Runner::start(&s.cfg, CaptureIn::OwnWindow) {
@@ -111,44 +163,252 @@ mod ui {
         s.status = "Nicht verbunden".into();
     }
 
+    fn later(f: impl FnOnce(&mut State) + Send + 'static) {
+        if let Some(h) = HANDLE.get() {
+            h.update(move |s, _| f(s));
+        }
+    }
+
+    fn open_login(s: &mut State) {
+        match psn::open_login_page() {
+            Ok(()) => s.message = "Melde dich im Browser bei Sony an, kopiere danach die Adresse der Seite „redirect“.".into(),
+            Err(e) => s.message = format!("{e:#}"),
+        }
+    }
+
+    fn fetch_account(s: &mut State) {
+        if s.busy {
+            return;
+        }
+        let code = match psn::code_from_redirect(&s.redirect.text) {
+            Ok(c) => c,
+            Err(e) => {
+                s.message = format!("{e:#}");
+                return;
+            }
+        };
+        s.busy = true;
+        s.message = "Frage Sony nach der Account-ID …".into();
+        std::thread::spawn(move || {
+            let res = psn::account_id_from_code(&code);
+            later(move |s| {
+                s.busy = false;
+                match res {
+                    Ok(id) => {
+                        s.account = Some(id.number);
+                        s.redirect = TextEdit::new("");
+                        s.message = "Account-ID geholt. Jetzt IP und Code der PS5 eintragen.".into();
+                    }
+                    Err(e) => s.message = format!("{e:#}"),
+                }
+            });
+        });
+    }
+
+    fn pair(s: &mut State) {
+        if s.busy {
+            return;
+        }
+        let Some(account) = s.account else {
+            s.message = "Erst die Account-ID holen (Schritt 1).".into();
+            return;
+        };
+        let Ok(pin) = s.pin.text.trim().parse::<u32>() else {
+            s.message = "Der Code besteht aus den 8 Ziffern, die die PS5 anzeigt.".into();
+            return;
+        };
+        let host = s.host.text.trim().to_string();
+        if host.is_empty() {
+            s.message = "Bitte die IP-Adresse der PS5 eintragen.".into();
+            return;
+        }
+        let path = s.path.clone();
+        s.busy = true;
+        s.message = "Koppeln …".into();
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<Config> {
+                let ip = resolve_host(&host)?;
+                let reg = regist::register(ip, pin, account.to_le_bytes())?;
+                cli::save_registration(&path, &host, &reg)?;
+                Config::load(&path)
+            })();
+            later(move |s| {
+                s.busy = false;
+                match res {
+                    Ok(cfg) => {
+                        s.cfg = cfg;
+                        s.pin = TextEdit::new("");
+                        s.message = "Gekoppelt. Du kannst jetzt verbinden.".into();
+                    }
+                    Err(e) => s.message = format!("Koppeln fehlgeschlagen: {e:#}"),
+                }
+            });
+        });
+    }
+
+    fn action_label(b: &Binding) -> String {
+        match b {
+            Binding::Simple(a) => a.clone(),
+            Binding::Detailed(d) => d.action.clone(),
+        }
+    }
+
+    fn remove_bind(s: &mut State, input: &str) {
+        let i = sel_index(s);
+        if let Some(p) = s.cfg.profiles.get_mut(i) {
+            p.bind.remove(input);
+        }
+    }
+
+    fn add_bind(s: &mut State) {
+        let (input, action) = (s.bind_input.text.trim().to_string(), s.bind_action.text.trim().to_string());
+        if input.is_empty() || action.is_empty() {
+            s.message = "Taste und Aktion eintragen (Namen: `tast2controller keys`).".into();
+            return;
+        }
+        let i = sel_index(s);
+        let Some(p) = s.cfg.profiles.get_mut(i) else { return };
+        let old = p.bind.insert(input.clone(), Binding::Simple(action));
+        match Mapper::new(&s.cfg) {
+            Ok(_) => {
+                s.bind_input = TextEdit::new("");
+                s.bind_action = TextEdit::new("");
+                s.message = "Belegung hinzugefügt; mit „Config speichern“ übernehmen.".into();
+            }
+            Err(e) => {
+                if let Some(p) = s.cfg.profiles.get_mut(i) {
+                    match old {
+                        Some(b) => p.bind.insert(input, b),
+                        None => p.bind.remove(&input),
+                    };
+                }
+                s.message = format!("Ungültig: {e:#}");
+            }
+        }
+    }
+
+    fn connect_tab(s: &State, t: Theme) -> El {
+        let running = s.runner.is_some();
+        let connection = card("connection", t)
+            .child(text("Verbindung").font(type_::TITLE).color(t.text))
+            .child(text(s.status.clone()).font(type_::LABEL).color(t.text_secondary))
+            .child(row().gap(10.0)
+                .child(if running {
+                    button("Trennen", "stop", t, false, stop)
+                } else {
+                    button("Verbinden", "start", t, true, start)
+                })
+                .child(button("Config speichern", "save", t, false, save)));
+
+        let paired = s.cfg.credentials().is_ok();
+        let pairing = card("pairing", t)
+            .child(text(if paired { "PS5 koppeln (bereits gekoppelt)" } else { "PS5 koppeln" }).font(type_::TITLE).color(t.text))
+            .child(text("1. Bei Sony anmelden: dein Passwort gibt nur du im Browser bei Sony ein.").font(type_::LABEL).color(t.text_secondary))
+            .child(row().gap(10.0).center_y()
+                .child(button("Sony-Anmeldung öffnen", "open-login", t, false, open_login))
+                .child(field("redirect", &s.redirect, "Adresse der Seite „redirect“ hier einfügen", t, |s| &mut s.redirect))
+                .child(button("Account-ID holen", "get-account", t, false, fetch_account)))
+            .child(text(if s.account.is_some() { "Account-ID: geholt" } else { "Account-ID: noch nicht geholt" }).font(type_::LABEL).color(t.text))
+            .child(text("2. PS5: Einstellungen › System › Remote-Wiedergabe › Gerät verknüpfen zeigt den Code.").font(type_::LABEL).color(t.text_secondary))
+            .child(row().gap(10.0).center_y()
+                .child(field("host", &s.host, "IP-Adresse der PS5", t, |s| &mut s.host))
+                .child(field("pin", &s.pin, "8-stelliger Code", t, |s| &mut s.pin))
+                .child(button("Koppeln", "pair", t, true, pair)));
+        col().gap(16.0).child(connection).child(pairing)
+    }
+
+    fn keys_tab(s: &State, t: Theme) -> El {
+        let i = sel_index(s);
+        let mut chips = row().gap(8.0).flex_wrap();
+        for (n, p) in s.cfg.profiles.iter().enumerate() {
+            chips = chips.child(chip(&p.name, format!("profile-{n}"), n == i, t, move |s: &mut State| s.sel = n));
+        }
+        let mut list = col().key("binds").gap(6.0);
+        if let Some(p) = s.cfg.profiles.get(i) {
+            let is_start = s.cfg.input.start_profile.as_deref().map(|n| n.eq_ignore_ascii_case(&p.name)).unwrap_or(i == 0);
+            list = list.child(text(if is_start { "Startprofil" } else { "Kein Startprofil" }).font(type_::LABEL).color(t.text_secondary));
+            for (input, binding) in &p.bind {
+                let name = input.clone();
+                list = list.child(row().gap(10.0).center_y().h(30.0)
+                    .child(text(input.clone()).font(type_::LABEL).color(t.text).w(120.0))
+                    .child(text(format!("→ {}", action_label(binding))).font(type_::LABEL).color(t.text_secondary).grow(1.0))
+                    .child(button("✕", &format!("rm-{input}"), t, false, move |s: &mut State| remove_bind(s, &name))));
+            }
+        }
+        let add = card("add-bind", t)
+            .child(text("Belegung hinzufügen").font(type_::TITLE).color(t.text))
+            .child(row().gap(10.0).center_y()
+                .child(field("bind-input", &s.bind_input, "Taste, z. B. W oder MouseLeft", t, |s| &mut s.bind_input))
+                .child(field("bind-action", &s.bind_action, "Aktion, z. B. cross oder left_stick_up", t, |s| &mut s.bind_action))
+                .child(button("Hinzufügen", "bind-add", t, true, add_bind)));
+        let start_btn = button("Als Startprofil setzen", "set-start", t, false, |s: &mut State| {
+            let i = sel_index(s);
+            if let Some(p) = s.cfg.profiles.get(i) {
+                s.cfg.input.start_profile = Some(p.name.clone());
+            }
+        });
+        col().gap(14.0).child(chips).child(row().child(start_btn)).child(card("bind-list", t).child(list)).child(add)
+    }
+
+    fn mouse_tab(s: &State, t: Theme) -> El {
+        let i = sel_index(s);
+        let Some(p) = s.cfg.profiles.get(i) else {
+            return col().child(text("Kein Profil in der Config.").font(type_::LABEL).color(t.text_secondary));
+        };
+        let m = p.mouse.engine.clone();
+        let target = p.mouse.target;
+        let set_target = |tg: MouseTarget| move |s: &mut State| {
+            let i = sel_index(s);
+            if let Some(p) = s.cfg.profiles.get_mut(i) {
+                p.mouse.target = tg;
+            }
+        };
+        let targets = row().gap(8.0).flex_wrap()
+            .child(chip("Rechter Stick", "tg-right".into(), target == MouseTarget::RightStick, t, set_target(MouseTarget::RightStick)))
+            .child(chip("Linker Stick", "tg-left".into(), target == MouseTarget::LeftStick, t, set_target(MouseTarget::LeftStick)))
+            .child(chip("Gyro", "tg-gyro".into(), target == MouseTarget::Gyro, t, set_target(MouseTarget::Gyro)))
+            .child(chip("Aus", "tg-none".into(), target == MouseTarget::None, t, set_target(MouseTarget::None)))
+            .child(chip(if m.invert_y { "Y invertiert" } else { "Y normal" }, "invert-y".into(), m.invert_y, t,
+                |s: &mut State| nudge(s, |m| m.invert_y = !m.invert_y)));
+        let stepper = |label: &str, key: &str, value: f32, down: fn(&mut State), up: fn(&mut State)| {
+            row().gap(10.0).center_y()
+                .child(text(label.to_string()).font(type_::LABEL).color(t.text_secondary).w(140.0))
+                .child(button("−", &format!("{key}-down"), t, false, down))
+                .child(text(format!("{value:.2}")).font(type_::LABEL).color(t.text).w(60.0))
+                .child(button("+", &format!("{key}-up"), t, false, up))
+        };
+        let tuning = card("tuning", t)
+            .child(text(format!("Maus: Profil {}", p.name)).font(type_::TITLE).color(t.text))
+            .child(targets)
+            .child(stepper("Empfindlichkeit", "sens", m.sensitivity, |s| nudge(s, |m| m.sensitivity -= 0.01), |s| nudge(s, |m| m.sensitivity += 0.01)))
+            .child(stepper("Kurve", "curve", m.curve, |s| nudge(s, |m| m.curve -= 0.1), |s| nudge(s, |m| m.curve += 0.1)))
+            .child(stepper("Anti-Deadzone", "adz", m.anti_deadzone, |s| nudge(s, |m| m.anti_deadzone -= 0.01), |s| nudge(s, |m| m.anti_deadzone += 0.01)))
+            .child(stepper("Beschleunigung", "accel", m.acceleration, |s| nudge(s, |m| m.acceleration -= 0.1), |s| nudge(s, |m| m.acceleration += 0.1)))
+            .child(stepper("Glättung (ms)", "smooth", m.smoothing_ms, |s| nudge(s, |m| m.smoothing_ms -= 1.0), |s| nudge(s, |m| m.smoothing_ms += 1.0)))
+            .child(stepper("ADS-Faktor (L2)", "ads", m.ads_multiplier, |s| nudge(s, |m| m.ads_multiplier -= 0.05), |s| nudge(s, |m| m.ads_multiplier += 0.05)))
+            .child(text("Änderungen wirken nach „Config speichern“ und neuem Verbinden.").font(type_::LABEL).color(t.text_secondary));
+        let mut chips = row().gap(8.0).flex_wrap();
+        for (n, p) in s.cfg.profiles.iter().enumerate() {
+            chips = chips.child(chip(&p.name, format!("mprofile-{n}"), n == i, t, move |s: &mut State| s.sel = n));
+        }
+        col().gap(14.0).child(chips).child(tuning)
+    }
+
     fn view(s: &State, cx: &mut Cx<State>) -> El {
         let t = tok::theme(cx.env().system_dark);
-        let running = s.runner.is_some();
-        let profile = s.runner.as_ref().map(|r| r.active_profile()).unwrap_or_else(|| {
-            s.cfg.profiles.first().map(|p| p.name.clone()).unwrap_or_default()
-        });
-        let m = s.cfg.profiles.first().map(|p| p.mouse.engine.clone()).unwrap_or_default();
-
-        let header = col().gap(4.0)
+        let tabs = row().gap(8.0)
+            .child(chip("Verbindung", "tab-connect".into(), s.tab == Tab::Connect, t, |s: &mut State| s.tab = Tab::Connect))
+            .child(chip("Profile & Tasten", "tab-keys".into(), s.tab == Tab::Keys, t, |s: &mut State| s.tab = Tab::Keys))
+            .child(chip("Maus", "tab-mouse".into(), s.tab == Tab::Mouse, t, |s: &mut State| s.tab = Tab::Mouse));
+        let body = match s.tab {
+            Tab::Connect => connect_tab(s, t),
+            Tab::Keys => keys_tab(s, t),
+            Tab::Mouse => mouse_tab(s, t),
+        };
+        let mut page = col().w_full().h_full().padding(28.0).gap(14.0).fill(t.bg)
             .child(text("Tast2ControllerRust").font(type_::TITLE).color(t.text))
-            .child(text(s.status.clone()).font(type_::LABEL).color(t.text_secondary));
-
-        let controls = row().gap(10.0)
-            .child(if running {
-                button("Trennen", "stop", t, false, stop)
-            } else {
-                button("Verbinden", "start", t, true, start)
-            })
-            .child(button("Config speichern", "save", t, false, save));
-
-        let tuning = col().key("tuning").gap(10.0).padding(16.0).radius(12.0).fill(t.card).border(1.0, t.card_border)
-            .child(text(format!("Maus (Profil: {profile})")).font(type_::TITLE).color(t.text))
-            .child(stepper("Empfindlichkeit", "sens", m.sensitivity, t,
-                |s| nudge(s, |m| m.sensitivity -= 0.01), |s| nudge(s, |m| m.sensitivity += 0.01)))
-            .child(stepper("Kurve", "curve", m.curve, t,
-                |s| nudge(s, |m| m.curve -= 0.1), |s| nudge(s, |m| m.curve += 0.1)))
-            .child(stepper("Anti-Deadzone", "adz", m.anti_deadzone, t,
-                |s| nudge(s, |m| m.anti_deadzone -= 0.01), |s| nudge(s, |m| m.anti_deadzone += 0.01)))
-            .child(stepper("Beschleunigung", "accel", m.acceleration, t,
-                |s| nudge(s, |m| m.acceleration -= 0.1), |s| nudge(s, |m| m.acceleration += 0.1)))
-            .child(stepper("Glättung (ms)", "smooth", m.smoothing_ms, t,
-                |s| nudge(s, |m| m.smoothing_ms -= 1.0), |s| nudge(s, |m| m.smoothing_ms += 1.0)))
-            .child(stepper("ADS-Faktor (L2)", "ads", m.ads_multiplier, t,
-                |s| nudge(s, |m| m.ads_multiplier -= 0.05), |s| nudge(s, |m| m.ads_multiplier += 0.05)))
-            .child(text("Änderungen wirken nach „Config speichern“ und neuem Verbinden.").font(type_::LABEL).color(t.text_secondary));
-
-        let mut page = col().w_full().h_full().padding(28.0).gap(16.0).fill(t.bg)
-            .child(header).child(controls).child(tuning);
+            .child(tabs)
+            .child(col().key(format!("body-{}", s.tab as u8)).child(body).scroll(rune::ScrollSpec { stick_bottom: false }).shrink().min_h(0.0).grow(1.0));
         if !s.message.is_empty() {
             page = page.child(text(s.message.clone()).font(type_::LABEL).color(t.text_secondary));
         }
@@ -156,8 +416,8 @@ mod ui {
     }
 
     pub fn run() {
-        let mut spec = AppSpec::new("Tast2ControllerRust", (640.0, 640.0), State::default, view);
-        spec.min_size = Some((520.0, 520.0));
+        let mut spec = AppSpec::new("Tast2ControllerRust", (760.0, 720.0), State::default, view);
+        spec.min_size = Some((600.0, 520.0));
         let app = App::new(spec);
         let _ = HANDLE.set(app.handle());
         // Refresh the connection status twice a second.
