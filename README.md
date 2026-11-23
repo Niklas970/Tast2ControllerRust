@@ -1,3 +1,5 @@
+<img src="assets/icon/tast2controller-128.png" width="96" alt="Tast2Controller-Logo" align="right">
+
 # Tast2ControllerRust
 
 Maus und Tastatur als DualSense für die PS5 (Remote Play, nur Eingabe, kein Video/Audio). Windows-Client in Rust mit verbesserter Maussteuerung.
@@ -23,6 +25,9 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+## Logo
+Eigener Entwurf (Controller mit klickendem Mauszeiger), unter `assets/icon/`: SVG als Quelle, ICO (16 bis 256 px) für die EXE, PNGs für Doku und Tray. `gui/build.rs` bettet das ICO beim Windows-Build in die EXE ein.
 
 ## Lizenz und Herkunft
 AGPL-3.0-only. Der Protokoll-Kern stammt aus [chiaki-controller](https://github.com/Acidream/chiaki-controller) und basiert auf chiaki-ng, siehe `NOTICE`. Nicht mit Sony verbunden. Nur für die eigene PS5 im lokalen Netz und für Story-/Offline-Spiele gedacht.
