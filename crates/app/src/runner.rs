@@ -2,7 +2,7 @@
 //! capture, either in its own small window or in the settings window. Can be started and
 //! stopped any number of times.
 
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
