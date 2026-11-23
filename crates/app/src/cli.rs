@@ -4,6 +4,7 @@
 use crate::runner;
 use crate::{
     config, http, logbuf, parse_account_id, psn, regist, resolve_host, session, set_console_value,
+    update,
 };
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -65,6 +66,12 @@ enum Command {
     Status,
     /// List the input names usable in the config
     Keys,
+    /// Download and install the newest release (checked against its SHA-256)
+    Update {
+        /// Only show whether a newer version exists
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -154,6 +161,7 @@ pub fn main() {
 }
 
 fn real_main(cli: Cli) -> Result<()> {
+    update::cleanup_old();
     let config_path = cli.config.clone().unwrap_or_else(default_config_path);
     match cli.command.unwrap_or(Command::Gui) {
         Command::Gui => {
@@ -221,6 +229,26 @@ Your PSN account ID: {}   (as a number: {})",
                 id.base64, id.number
             );
             println!("Use it with: tast2controller register --host <PS5 address> --pin <code> --account-id {}", id.base64);
+            Ok(())
+        }
+        Command::Update { check } => {
+            let current = update::current_version();
+            let Some(rel) = update::check()? else {
+                println!("tast2controller {current} is up to date");
+                return Ok(());
+            };
+            println!("new version {} available (installed: {current})", rel.tag);
+            if check {
+                println!("install it with: tast2controller update");
+                return Ok(());
+            }
+            println!("downloading and checking the SHA-256 ...");
+            let path = update::install(&rel)?;
+            println!(
+                "updated {} to {}; start it again to use the new version",
+                path.display(),
+                rel.tag
+            );
             Ok(())
         }
         Command::Keys => {
