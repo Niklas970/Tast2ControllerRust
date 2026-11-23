@@ -27,6 +27,7 @@ mod ui {
     use rune::{App, AppHandle, AppSpec, Color, Cx, El, TextEdit, col, row, text, text_input};
     use tast2controller::config::{Binding, Config, MouseTarget};
     use tast2controller::input::mapper::Mapper;
+    use tast2controller::input::windows;
     use tast2controller::runner::{CaptureIn, Runner};
     use tast2controller::regist::FoundConsole;
     use tast2controller::{DISCOVER_WAIT, cli, pick_for_pairing, psn, regist, resolve_host, update};
@@ -66,6 +67,10 @@ mod ui {
         // self-update
         update: Option<update::Release>,
         updating: bool,
+        /// Whether this window feeds the capture host (subclassed once, on first connect).
+        capture_ready: bool,
+        /// Whether keyboard and mouse go to the PS5 right now.
+        capturing: bool,
     }
 
     impl Default for State {
@@ -99,6 +104,8 @@ mod ui {
                 bind_action: TextEdit::new(""),
                 update: None,
                 updating: false,
+                capture_ready: false,
+                capturing: false,
             }
         }
     }
@@ -159,12 +166,40 @@ mod ui {
             s.message = format!("{e:#}");
             return;
         }
-        match Runner::start(&s.cfg, CaptureIn::OwnWindow) {
+        // Capture in this window; fall back to the small capture window if that fails.
+        let capture_in = match capture_target(s) {
+            Ok(hwnd) => CaptureIn::Window(hwnd),
+            Err(e) => {
+                log::warn!("capturing in the settings window failed, using an own window: {e:#}");
+                CaptureIn::OwnWindow
+            }
+        };
+        match Runner::start(&s.cfg, capture_in) {
             Ok(r) => {
                 s.runner = Some(r);
-                s.message.clear();
+                s.message = format!(
+                    "Verbindung wird aufgebaut. {} gibt Maus und Tastatur frei oder holt sie zurück, {} trennt.",
+                    s.cfg.input.capture_toggle, s.cfg.input.quit
+                );
             }
             Err(e) => s.message = format!("Start fehlgeschlagen: {e:#}"),
+        }
+    }
+
+    /// This window's handle, prepared for capturing. Runs on the UI thread, which owns the window.
+    fn capture_target(s: &mut State) -> anyhow::Result<isize> {
+        let hwnd = windows::window_of_current_thread()
+            .ok_or_else(|| anyhow::anyhow!("settings window not found"))?;
+        if !s.capture_ready {
+            windows::install_in_window(hwnd)?;
+            s.capture_ready = true;
+        }
+        Ok(hwnd)
+    }
+
+    fn take_input(s: &mut State) {
+        if let Some(r) = &s.runner {
+            r.set_capture(true);
         }
     }
 
@@ -174,6 +209,7 @@ mod ui {
             let _ = r.stop_and_wait();
         }
         s.status = "Nicht verbunden".into();
+        s.capturing = false;
     }
 
     fn later(f: impl FnOnce(&mut State) + Send + 'static) {
@@ -374,14 +410,27 @@ mod ui {
         let running = s.runner.is_some();
         let connection = card("connection", t)
             .child(text("Verbindung").font(type_::TITLE).color(t.text))
-            .child(text(s.status.clone()).font(type_::LABEL).color(t.text_secondary))
-            .child(row().gap(10.0)
-                .child(if running {
-                    button("Trennen", "stop", t, false, stop)
-                } else {
-                    button("Verbinden", "start", t, true, start)
-                })
-                .child(button("Config speichern", "save", t, false, save)));
+            .child(text(s.status.clone()).font(type_::LABEL).color(t.text_secondary));
+        let connection = if running {
+            let (line, color) = if s.capturing {
+                (format!("Maus und Tastatur steuern die PS5. {} gibt sie frei, {} trennt.",
+                    s.cfg.input.capture_toggle, s.cfg.input.quit), accent())
+            } else {
+                (format!("Maus und Tastatur sind frei. „Steuerung übernehmen“ oder {} schickt sie an die PS5.",
+                    s.cfg.input.capture_toggle), t.text_secondary)
+            };
+            connection.child(text(line).font(type_::LABEL).color(color))
+        } else {
+            connection
+        };
+        let mut buttons = row().gap(10.0);
+        buttons = if running {
+            buttons.child(button("Steuerung übernehmen", "capture", t, !s.capturing, take_input))
+                .child(button("Trennen", "stop", t, false, stop))
+        } else {
+            buttons.child(button("Verbinden", "start", t, true, start))
+        };
+        let connection = connection.child(buttons.child(button("Config speichern", "save", t, false, save)));
 
         let paired = s.cfg.credentials().is_ok();
         let mut consoles = row().gap(8.0).flex_wrap().center_y();
@@ -536,8 +585,10 @@ mod ui {
                     h.update(|s, _| {
                         if let Some(r) = &s.runner {
                             s.status = r.run_state().phase.label();
+                            s.capturing = r.is_capturing();
                             if r.is_finished() {
                                 s.runner = None;
+                                s.capturing = false;
                             }
                         }
                     });
