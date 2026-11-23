@@ -1,11 +1,11 @@
 # Session Handoff
 
-- **Generated:** 2026-11-23T16:43:01.317Z
+- **Generated:** 2026-11-23T17:07:33.323Z
 - **Session ID:** f95c1ead-1ff1-5bba-a39d-73089a6cd3d5
 - **End reason:** other
 - **Working directory:** /home/claude/tast2controllerrust
 - **Git branch:** main
-- **Last commit:** f3ee312 Add app crate: config, key mapper with new mouse engine, PSN login, Windows input, CLI, CI
+- **Last commit:** 46ced32 One program: settings window with pairing, profiles, key editor and mouse tuning; CLI via arguments
 - **Prompts this session:** 0
 
 ## Session goal
