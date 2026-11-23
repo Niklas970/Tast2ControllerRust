@@ -1,0 +1,142 @@
+# tast2controller configuration
+#
+# 1. Register once:  tast2controller register --host 192.168.1.50 --pin 12345678 --account-id <id>
+#    (fills in the [console] section below)
+# 2. Play:            tast2controller
+#
+# Input names: run `tast2controller keys`, or press a key while capturing and read
+# "Last input" in the window.
+
+[console]
+host = ""
+regist_key = ""
+rp_key = ""
+# PSN login passcode, only if your console asks for one:
+# login_pin = "1234"
+# Wake the console from rest mode automatically:
+wake = true
+
+[stream]
+# Video is never decoded. The console still sends it, so ask for the smallest stream:
+resolution = "360p"   # 360p | 540p | 720p | 1080p
+fps = 30              # 30 | 60
+# bitrate_kbps = 2000
+dualsense = true      # false = present as a DualShock 4
+reconnect = true
+
+[input]
+capture_toggle = "F8"   # grab / release keyboard and mouse
+quit = "F12"
+capture_on_start = true
+wheel_press_ms = 50     # how long one wheel notch holds its action
+tick_hz = 500           # mouse-to-stick update rate
+# start_profile = "shooter"
+
+# ---------------------------------------------------------------------------------------
+# Profiles. Bindings map an input name to an action:
+#
+#   buttons:  cross circle square triangle  l1 r1 l2 r2 l3 r3
+#             dpad_up dpad_down dpad_left dpad_right  options create(share) touchpad ps
+#   sticks:   left_stick_up/down/left/right  right_stick_up/down/left/right
+#   other:    left_stick_scale / right_stick_scale (hold to slow the stick, e.g. walk)
+#             touch (finger on the touchpad at x, y), touch_left, touch_right
+#             profile:<name>, profile_next
+#
+# Long form:  Key = { action = "r2", value = 0.5, toggle = true, turbo_hz = 10 }
+#   value     stick deflection, trigger pressure or scale factor (0.0 - 1.0)
+#   toggle    press once to hold, press again to release
+#   turbo_hz  repeat while held
+#
+# Mouse:
+#   target          right_stick | left_stick | gyro (experimental) | none
+#   sensitivity     stick deflection per (mouse count / ms)
+#   sensitivity_x/y per axis multipliers
+#   anti_deadzone   where the stick output starts, to skip the game's dead zone
+#   curve           1 = linear, >1 = finer small movements
+#   acceleration    extra gain for fast flicks (0 = off)
+#   ads_multiplier  mouse speed factor while L2 is held
+#   noise_floor     ignore movement slower than this (counts/ms)
+#   max_deflection  cap on deflection
+#   smoothing_ms    averaging window; raise for jittery / 125 Hz mice, lower for less lag
+#   gyro_sensitivity rad/s per (mouse count / ms) for target = "gyro"
+# ---------------------------------------------------------------------------------------
+
+[[profile]]
+name = "shooter"
+normalize_diagonals = true
+
+[profile.mouse]
+target = "right_stick"
+sensitivity = 0.08
+sensitivity_x = 1.0
+sensitivity_y = 0.8
+invert_y = false
+curve = 1.3
+acceleration = 0.0
+anti_deadzone = 0.12
+max_deflection = 1.0
+smoothing_ms = 12
+ads_multiplier = 0.6   # slows the mouse while L2 (aim) is held
+noise_floor = 0.0
+
+[profile.bind]
+W = "left_stick_up"
+S = "left_stick_down"
+A = "left_stick_left"
+D = "left_stick_right"
+LCtrl = { action = "left_stick_scale", value = 0.45 }   # walk
+LShift = "l3"          # sprint
+Space = "cross"        # jump
+C = "circle"           # crouch
+R = "square"           # reload / interact
+F = "square"
+"1" = "triangle"       # switch weapon
+WheelUp = "triangle"
+WheelDown = "triangle"
+Q = "l1"
+G = "r1"
+E = "r1"
+V = "r3"               # melee
+MouseMiddle = "r3"
+MouseLeft = "r2"       # fire
+MouseRight = "l2"      # aim
+Mouse4 = "dpad_left"
+Mouse5 = "dpad_right"
+Up = "dpad_up"
+Down = "dpad_down"
+Left = "dpad_left"
+Right = "dpad_right"
+X = "dpad_down"
+Z = "dpad_up"
+Tab = "touchpad"
+Escape = "options"
+Backspace = "create"
+Home = "ps"
+F2 = "profile:menu"
+
+[[profile]]
+name = "menu"
+
+[profile.mouse]
+target = "none"
+
+[profile.bind]
+W = "dpad_up"
+S = "dpad_down"
+A = "dpad_left"
+D = "dpad_right"
+Up = "dpad_up"
+Down = "dpad_down"
+Left = "dpad_left"
+Right = "dpad_right"
+Enter = "cross"
+Space = "cross"
+MouseLeft = "cross"
+Backspace = "circle"
+MouseRight = "circle"
+Escape = "options"
+Q = "l1"
+E = "r1"
+Tab = "touchpad"
+Home = "ps"
+F1 = "profile:shooter"
