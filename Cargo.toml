@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/input"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+authors = ["Niklas Schmid"]
+
+[workspace.lints.clippy]
+all = "warn"

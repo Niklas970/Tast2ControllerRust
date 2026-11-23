@@ -1,0 +1,23 @@
+[package]
+name = "tast2controller-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes = "0.8.4"
+cfb-mode = "0.8.2"
+aes-gcm = "0.10.3"
+hmac = "0.12.1"
+sha2 = "0.10.8"
+k256 = { version = "0.13.4", features = ["ecdh"] }
+rand = "0.8.5"
+base64 = "0.22.1"
+anyhow = "1.0.89"
+log = "0.4.22"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Networking_WinSock"] }
+
+[lints]
+workspace = true

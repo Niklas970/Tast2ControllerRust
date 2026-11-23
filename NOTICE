@@ -1,0 +1,7 @@
+Tast2ControllerRust
+
+Teile des Protokoll-Kerns (crates/core) stammen aus
+  - chiaki-controller von Acidream (AGPL-3.0-only), https://github.com/Acidream/chiaki-controller
+  - chiaki-ng / Chiaki (AGPL-3.0), https://github.com/streetpea/chiaki-ng
+Diese Teile bleiben unter der AGPL-3.0-only; daher steht das gesamte Projekt unter AGPL-3.0-only.
+Die Maus-Engine (crates/input) ist eine Neuentwicklung. Das Projekt ist nicht mit Sony verbunden.
