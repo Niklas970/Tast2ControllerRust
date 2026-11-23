@@ -1,7 +1,8 @@
 //! tast2controller: an input-only PS5 Remote Play client for Windows.
 //! Sends keyboard and mouse input to a PS5 as a DualSense; never decodes video or audio.
 
-#![cfg_attr(not(windows), allow(dead_code))]
+// Several APIs are only used by the settings window, which is not built yet.
+#![allow(dead_code)]
 
 mod config;
 mod input;
