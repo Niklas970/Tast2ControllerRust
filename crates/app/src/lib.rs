@@ -11,10 +11,13 @@ pub mod runner;
 
 pub use tast2controller_core::{controller, http, logbuf, regist, session, stream};
 
-use anyhow::{Context, Result};
+use std::net::IpAddr;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
 use base64::Engine;
 
-pub fn resolve_host(host: &str) -> Result<std::net::IpAddr> {
+pub fn resolve_host(host: &str) -> Result<IpAddr> {
     use std::net::ToSocketAddrs;
     if let Ok(ip) = host.trim().parse() {
         return Ok(ip);
@@ -25,6 +28,80 @@ pub fn resolve_host(host: &str) -> Result<std::net::IpAddr> {
         .find(|a| a.is_ipv4())
         .map(|a| a.ip())
         .with_context(|| format!("no IPv4 address for {host}"))
+}
+
+/// How long a network search for consoles waits for answers.
+pub const DISCOVER_WAIT: Duration = Duration::from_secs(2);
+
+/// Finds the address of the paired console.
+///
+/// - `host` set: it is used, unless the console has a known MAC (`host_id`), doesn't answer
+///   there and answers at another address (its IP changed, e.g. via DHCP).
+/// - `host` empty: the console is searched on the network by its MAC, or the only PS5 found is used.
+pub fn resolve_console(console: &config::ConsoleConfig) -> Result<IpAddr> {
+    let host = console.host.trim();
+    if !host.is_empty() {
+        let ip = resolve_host(host)?;
+        if console.host_id.trim().is_empty() || regist::probe(ip).is_ok() {
+            return Ok(ip);
+        }
+        return match regist::find_by_host_id(&console.host_id, DISCOVER_WAIT) {
+            Ok(Some(found)) if found.ip != ip => {
+                log::info!("{} moved from {ip} to {}", found.name, found.ip);
+                Ok(found.ip)
+            }
+            _ => Ok(ip),
+        };
+    }
+    if !console.host_id.trim().is_empty() {
+        return regist::find_by_host_id(&console.host_id, DISCOVER_WAIT)?
+            .map(|c| c.ip)
+            .context("the paired PS5 was not found on the network (is it on or in rest mode?)");
+    }
+    let found = regist::discover(DISCOVER_WAIT)?;
+    match found.as_slice() {
+        [one] => Ok(one.ip),
+        [] => bail!("no PS5 found on the network; enter its IP address"),
+        _ => bail!(
+            "several consoles found ({}); enter the IP address of yours",
+            describe_consoles(&found)
+        ),
+    }
+}
+
+/// "PS5-123 (192.168.1.50, on), ..." for messages.
+pub fn describe_consoles(found: &[regist::FoundConsole]) -> String {
+    found
+        .iter()
+        .map(|c| {
+            format!(
+                "{} ({}, {})",
+                c.name,
+                c.ip,
+                if c.awake { "on" } else { "rest mode" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Picks the console to pair with: only running consoles can show the Link Device code.
+pub fn pick_for_pairing(found: &[regist::FoundConsole]) -> Result<&regist::FoundConsole> {
+    let awake: Vec<_> = found.iter().filter(|c| c.awake).collect();
+    match (awake.as_slice(), found) {
+        ([one], _) => Ok(one),
+        ([], []) => bail!(
+            "no PS5 found on the network; is it on and in the same network? Otherwise enter its IP address"
+        ),
+        ([], _) => bail!(
+            "the PS5 is in rest mode ({}); turn it on and open the Link Device screen",
+            describe_consoles(found)
+        ),
+        _ => bail!(
+            "several consoles are on ({}); choose one by its IP address",
+            describe_consoles(found)
+        ),
+    }
 }
 
 pub fn parse_account_id(s: &str) -> Result<[u8; 8]> {
@@ -109,6 +186,40 @@ mod tests {
         // idempotent
         let d2 = set_console_value(&d, "host", "10.0.0.6");
         assert_eq!(d2.matches("host =").count(), 1);
+    }
+
+    fn console(name: &str, ip: &str, awake: bool) -> regist::FoundConsole {
+        regist::FoundConsole {
+            ip: ip.parse().unwrap(),
+            name: name.into(),
+            awake,
+            host_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn pairing_picks_the_only_running_console() {
+        let found = [
+            console("A", "10.0.0.2", false),
+            console("B", "10.0.0.3", true),
+        ];
+        assert_eq!(pick_for_pairing(&found).unwrap().name, "B");
+        assert!(pick_for_pairing(&[]).is_err());
+        assert!(pick_for_pairing(&found[..1]).is_err());
+        let two_on = [
+            console("A", "10.0.0.2", true),
+            console("B", "10.0.0.3", true),
+        ];
+        assert!(pick_for_pairing(&two_on).is_err());
+    }
+
+    #[test]
+    fn manual_host_without_mac_is_used_as_is() {
+        let c = config::ConsoleConfig {
+            host: "10.0.0.5".into(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_console(&c).unwrap().to_string(), "10.0.0.5");
     }
 
     #[test]

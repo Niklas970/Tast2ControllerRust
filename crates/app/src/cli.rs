@@ -3,7 +3,8 @@
 #[cfg(windows)]
 use crate::runner;
 use crate::{
-    config, http, logbuf, parse_account_id, psn, regist, resolve_host, session, set_console_value,
+    config, describe_consoles, http, logbuf, parse_account_id, pick_for_pairing, psn, regist,
+    resolve_console, resolve_host, session, set_console_value, DISCOVER_WAIT,
 };
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -41,9 +42,9 @@ enum Command {
     },
     /// Pair with a PS5 (Settings > System > Remote Play > Link Device shows the code)
     Register {
-        /// IP address of the PS5
+        /// IP address of the PS5 (default: search the network)
         #[arg(long)]
-        host: String,
+        host: Option<String>,
         /// The 8 digit code shown on the console
         #[arg(long)]
         pin: String,
@@ -55,6 +56,8 @@ enum Command {
     Gui,
     /// Connect and send controller input, without the settings window
     Run,
+    /// Search the network for PS5 consoles
+    Discover,
     /// Look up your PSN account ID (sign in on Sony's page in your browser)
     AccountId,
     /// Wake the PS5 from rest mode
@@ -104,6 +107,10 @@ pub fn save_registration(config_path: &Path, host: &str, reg: &regist::Registere
     doc = set_console_value(&doc, "rp_key", &http::hex(&reg.creds.morning));
     if !reg.nickname.is_empty() {
         doc = set_console_value(&doc, "nickname", &reg.nickname);
+    }
+    let mac = regist::normalize_host_id(&reg.mac);
+    if !mac.is_empty() {
+        doc = set_console_value(&doc, "host_id", &mac);
     }
     toml::from_str::<Config>(&doc).context("updated config does not parse")?;
     if let Some(dir) = config_path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -177,7 +184,16 @@ fn real_main(cli: Cli) -> Result<()> {
             pin,
             account_id,
         } => {
-            let ip = resolve_host(&host)?;
+            let ip = match host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+                Some(h) => resolve_host(h)?,
+                None => {
+                    println!("searching the network for a PS5 ...");
+                    let found = regist::discover(DISCOVER_WAIT)?;
+                    let c = pick_for_pairing(&found)?;
+                    println!("found {} at {}", c.name, c.ip);
+                    c.ip
+                }
+            };
             let pin: u32 = pin
                 .trim()
                 .parse()
@@ -185,7 +201,7 @@ fn real_main(cli: Cli) -> Result<()> {
             let account = parse_account_id(&account_id)?;
             log::info!("registering with {ip} ...");
             let reg = regist::register(ip, pin, account)?;
-            save_registration(&config_path, &host, &reg)?;
+            save_registration(&config_path, &ip.to_string(), &reg)?;
             println!(
                 "registered with {} (MAC {}); credentials saved to {}",
                 if reg.nickname.is_empty() {
@@ -196,6 +212,16 @@ fn real_main(cli: Cli) -> Result<()> {
                 reg.mac,
                 config_path.display()
             );
+            Ok(())
+        }
+        Command::Discover => {
+            let found = regist::discover(DISCOVER_WAIT)?;
+            if found.is_empty() {
+                println!("no PS5 found (is it on or in rest mode, and in the same network?)");
+            }
+            for c in &found {
+                println!("{}", describe_consoles(std::slice::from_ref(c)));
+            }
             Ok(())
         }
         Command::AccountId => {
@@ -220,7 +246,10 @@ fn real_main(cli: Cli) -> Result<()> {
 Your PSN account ID: {}   (as a number: {})",
                 id.base64, id.number
             );
-            println!("Use it with: tast2controller register --host <PS5 address> --pin <code> --account-id {}", id.base64);
+            println!(
+                "Use it with: tast2controller register --pin <code> --account-id {}",
+                id.base64
+            );
             Ok(())
         }
         Command::Keys => {
@@ -281,10 +310,7 @@ Your PSN account ID: {}   (as a number: {})",
         cmd => {
             let cfg = Config::load(&config_path)?;
             let creds = cfg.credentials()?;
-            if cfg.console.host.is_empty() {
-                bail!("console.host is not set in {}", config_path.display());
-            }
-            let ip = resolve_host(&cfg.console.host)?;
+            let ip = resolve_console(&cfg.console)?;
             match cmd {
                 Command::Wake => {
                     regist::wakeup(ip, &creds)?;

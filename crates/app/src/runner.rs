@@ -15,7 +15,7 @@ use crate::input;
 use crate::input::windows::{HostOptions, WindowHandle};
 use crate::{regist, session, stream};
 
-pub use crate::resolve_host;
+pub use crate::{resolve_console, resolve_host};
 
 /// Sends a wakeup and waits until the console answers discovery as running.
 fn wake_and_wait(
@@ -244,10 +244,7 @@ impl Runner {
     /// Validates the config and starts the session and input capture.
     pub fn start(cfg: &Config, capture_in: CaptureIn) -> Result<Runner> {
         let creds = cfg.credentials()?;
-        if cfg.console.host.trim().is_empty() {
-            bail!("no console address set");
-        }
-        let ip = resolve_host(&cfg.console.host)?;
+        let ip = resolve_console(&cfg.console)?;
         let mut profile = stream::VideoProfile::preset(&cfg.stream.resolution, cfg.stream.fps)?;
         if let Some(b) = cfg.stream.bitrate_kbps {
             profile.bitrate_kbps = b;
@@ -636,7 +633,7 @@ fn session_loop(
 pub fn check_connection(cfg: &Config) -> std::result::Result<(), Problem> {
     let r = (|| -> Result<()> {
         let creds = cfg.credentials()?;
-        let ip = resolve_host(&cfg.console.host)?;
+        let ip = resolve_console(&cfg.console)?;
         let stop = AtomicBool::new(false);
         let nonce = match session::request_session(ip, &creds) {
             Ok(n) => n,
