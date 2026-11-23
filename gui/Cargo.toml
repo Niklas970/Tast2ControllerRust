@@ -1,0 +1,23 @@
+# Own workspace: Rune is pre-release and needs its own Rust version (see rust-toolchain.toml),
+# so the GUI stays out of the main workspace, like in the Schmidhome desktop app.
+[workspace]
+
+[package]
+name = "tast2controller-gui"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Settings window for Tast2ControllerRust (Rune)"
+
+[dependencies]
+tast2controller = { path = "../crates/app" }
+# Rune is pre-release: always pin a fixed dev revision.
+rune = { git = "https://github.com/anomalyco/rune", rev = "39301f6793266450a057f270da06b048a689be96" }
+anyhow = "1"
+tast2controller-input = { path = "../crates/input" }
+log = "0.4"
+
+[profile.release]
+lto = false
+codegen-units = 16

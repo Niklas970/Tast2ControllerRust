@@ -28,3 +28,21 @@ jobs:
         with:
           name: tast2controller-windows
           path: target/release/tast2controller.exe
+
+  gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust version Rune needs
+        working-directory: gui
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui
+      - name: Build the settings window
+        working-directory: gui
+        run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tast2controller-gui-windows
+          path: gui/target/release/tast2controller-gui.exe
