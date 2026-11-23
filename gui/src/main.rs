@@ -29,6 +29,7 @@ mod ui {
     use tast2controller::input::mapper::Mapper;
     use tast2controller::input::windows;
     use tast2controller::power::{self, Power};
+    use tast2controller::templates;
     use tast2controller::runner::{CaptureIn, Runner};
     use tast2controller::regist::FoundConsole;
     use tast2controller::{DISCOVER_WAIT, cli, pick_for_pairing, psn, regist, resolve_host, update};
@@ -342,12 +343,11 @@ mod ui {
                 match res {
                     Ok(found) => {
                         // preselect the console when the choice is clear
-                        if s.host.text.trim().is_empty()
-                            || !found.iter().any(|c| c.ip.to_string() == s.host.text.trim())
+                        if (s.host.text.trim().is_empty()
+                            || !found.iter().any(|c| c.ip.to_string() == s.host.text.trim()))
+                            && let Ok(c) = pick_for_pairing(&found)
                         {
-                            if let Ok(c) = pick_for_pairing(&found) {
-                                s.host = TextEdit::new(c.ip.to_string());
-                            }
+                            s.host = TextEdit::new(c.ip.to_string());
                         }
                         if found.is_empty() {
                             s.message = "Keine PS5 im Netzwerk gefunden. Ist sie an und im selben Netz? Sonst die IP unten eintragen.".into();
@@ -526,6 +526,48 @@ mod ui {
         }
     }
 
+    fn apply_template(s: &mut State, n: usize) {
+        let Some(tp) = templates::TEMPLATES.get(n) else { return };
+        let before = s.cfg.profiles.clone();
+        let res = templates::apply(&mut s.cfg, tp).and_then(|replaced| Mapper::new(&s.cfg).map(|_| replaced));
+        match res {
+            Ok(replaced) => {
+                let first = tp.profiles().ok().and_then(|p| p.first().map(|p| p.name.clone()));
+                if let Some(i) = first.and_then(|f| s.cfg.profiles.iter().position(|p| p.name.eq_ignore_ascii_case(&f))) {
+                    s.sel = i;
+                }
+                s.message = if replaced.is_empty() {
+                    format!("Vorlage „{}“ hinzugefügt; mit „Config speichern“ übernehmen.", tp.label)
+                } else {
+                    format!("Vorlage „{}“ übernommen, ersetzt: {}. Mit „Config speichern“ übernehmen.", tp.label, replaced.join(", "))
+                };
+            }
+            Err(e) => {
+                s.cfg.profiles = before;
+                s.message = format!("Vorlage passt nicht zur Config: {e:#}");
+            }
+        }
+    }
+
+    fn remove_profile(s: &mut State) {
+        let i = sel_index(s);
+        if s.cfg.profiles.len() <= 1 {
+            s.message = "Das letzte Profil bleibt stehen.".into();
+            return;
+        }
+        let removed = s.cfg.profiles.remove(i);
+        if let Err(e) = Mapper::new(&s.cfg) {
+            s.cfg.profiles.insert(i, removed);
+            s.message = format!("Profil wird noch gebraucht: {e:#}");
+            return;
+        }
+        if s.cfg.input.start_profile.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&removed.name)) {
+            s.cfg.input.start_profile = None;
+        }
+        s.sel = i.saturating_sub(1);
+        s.message = format!("Profil „{}“ gelöscht; mit „Config speichern“ übernehmen.", removed.name);
+    }
+
     fn connect_tab(s: &State, t: Theme) -> El {
         let running = s.runner.is_some();
         let connection = card("connection", t)
@@ -611,7 +653,17 @@ mod ui {
                 s.cfg.input.start_profile = Some(p.name.clone());
             }
         });
-        col().gap(14.0).child(chips).child(row().child(start_btn)).child(card("bind-list", t).child(list)).child(add)
+        let mut presets = card("templates", t)
+            .child(text("Vorlagen").font(type_::TITLE).color(t.text))
+            .child(text("Fügt fertige Profile hinzu; ein Profil mit gleichem Namen wird ersetzt. Wirkt nach „Config speichern“.").font(type_::LABEL).color(t.text_secondary));
+        for (n, tp) in templates::TEMPLATES.iter().enumerate() {
+            presets = presets.child(row().gap(10.0).center_y()
+                .child(button(tp.label, &format!("template-{n}"), t, false, move |s: &mut State| apply_template(s, n)))
+                .child(text(tp.about).font(type_::LABEL).color(t.text_secondary).grow(1.0)));
+        }
+        let remove_btn = button("Profil löschen", "profile-remove", t, false, remove_profile);
+        col().gap(14.0).child(chips).child(row().gap(10.0).child(start_btn).child(remove_btn))
+            .child(card("bind-list", t).child(list)).child(add).child(presets)
     }
 
     fn mouse_tab(s: &State, t: Theme) -> El {
