@@ -10,6 +10,7 @@ fn main() {
     #[cfg(windows)]
     {
         tast2controller::cli::detach_own_console();
+        tast2controller::update::cleanup_old();
         ui::run();
     }
     #[cfg(not(windows))]
@@ -28,7 +29,7 @@ mod ui {
     use tast2controller::input::mapper::Mapper;
     use tast2controller::runner::{CaptureIn, Runner};
     use tast2controller::regist::FoundConsole;
-    use tast2controller::{DISCOVER_WAIT, cli, pick_for_pairing, psn, regist, resolve_host};
+    use tast2controller::{DISCOVER_WAIT, cli, pick_for_pairing, psn, regist, resolve_host, update};
     use tast2controller_input::MouseConfig;
 
     static HANDLE: OnceLock<AppHandle<State>> = OnceLock::new();
@@ -62,6 +63,9 @@ mod ui {
         // new binding
         bind_input: TextEdit,
         bind_action: TextEdit,
+        // self-update
+        update: Option<update::Release>,
+        updating: bool,
     }
 
     impl Default for State {
@@ -93,6 +97,8 @@ mod ui {
                 searching: false,
                 bind_input: TextEdit::new(""),
                 bind_action: TextEdit::new(""),
+                update: None,
+                updating: false,
             }
         }
     }
@@ -293,6 +299,36 @@ mod ui {
         format!("{} · {} · {}", c.name, c.ip, if c.awake { "an" } else { "Ruhemodus" })
     }
 
+    fn install_update(s: &mut State) {
+        let Some(rel) = s.update.clone() else { return };
+        if s.updating {
+            return;
+        }
+        stop(s);
+        s.updating = true;
+        s.message = format!("Lade {} und prüfe die SHA-256 …", rel.tag);
+        std::thread::spawn(move || {
+            let res = update::install(&rel).and_then(|exe| update::restart(&exe));
+            match res {
+                // the new version is running now
+                Ok(()) => std::process::exit(0),
+                Err(e) => later(move |s| {
+                    s.updating = false;
+                    s.message = format!("Update fehlgeschlagen: {e:#}");
+                }),
+            }
+        });
+    }
+
+    fn update_banner(s: &State, t: Theme) -> Option<El> {
+        let rel = s.update.as_ref()?;
+        let label = if s.updating { "Aktualisiere …" } else { "Jetzt aktualisieren" };
+        Some(card("update", t)
+            .child(text(format!("Neue Version {} verfügbar (installiert: {})", rel.tag, update::current_version())).font(type_::TITLE).color(t.text))
+            .child(text("Lädt die EXE von GitHub, prüft die SHA-256 und startet das Programm neu. Eine laufende Verbindung wird getrennt.").font(type_::LABEL).color(t.text_secondary))
+            .child(row().child(button(label, "update-install", t, true, install_update))))
+    }
+
     fn action_label(b: &Binding) -> String {
         match b {
             Binding::Simple(a) => a.clone(),
@@ -466,7 +502,11 @@ mod ui {
         };
         let mut page = col().w_full().h_full().padding(28.0).gap(14.0).fill(t.bg)
             .child(text("Tast2ControllerRust").font(type_::TITLE).color(t.text))
-            .child(tabs)
+            .child(tabs);
+        if let Some(banner) = update_banner(s, t) {
+            page = page.child(banner);
+        }
+        page = page
             .child(col().key(format!("body-{}", s.tab as u8)).child(body).scroll(rune::ScrollSpec { stick_bottom: false }).shrink().min_h(0.0).grow(1.0));
         if !s.message.is_empty() {
             page = page.child(text(s.message.clone()).font(type_::LABEL).color(t.text_secondary));
@@ -479,6 +519,12 @@ mod ui {
         spec.min_size = Some((600.0, 520.0));
         let app = App::new(spec);
         let _ = HANDLE.set(app.handle());
+        // Look for a newer release once; stay quiet when offline.
+        std::thread::spawn(|| match update::check() {
+            Ok(Some(rel)) => later(move |s| s.update = Some(rel)),
+            Ok(None) => {}
+            Err(e) => log::info!("update check: {e:#}"),
+        });
         // Refresh the connection status twice a second.
         std::thread::spawn(|| {
             // Look for consoles right away so pairing needs no IP address.
