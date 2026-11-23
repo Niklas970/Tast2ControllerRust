@@ -28,6 +28,7 @@ mod ui {
     use tast2controller::config::{Binding, Config, MouseTarget};
     use tast2controller::input::mapper::Mapper;
     use tast2controller::input::windows;
+    use tast2controller::power::{self, Power};
     use tast2controller::runner::{CaptureIn, Runner};
     use tast2controller::regist::FoundConsole;
     use tast2controller::{DISCOVER_WAIT, cli, pick_for_pairing, psn, regist, resolve_host, update};
@@ -40,6 +41,28 @@ mod ui {
         Connect,
         Keys,
         Mouse,
+    }
+
+    /// What the settings window knows about the paired PS5's power.
+    #[derive(Clone, PartialEq)]
+    enum PowerView {
+        Unknown,
+        On,
+        Rest,
+        Waking,
+        Unreachable(String),
+    }
+
+    impl PowerView {
+        fn label(&self) -> String {
+            match self {
+                PowerView::Unknown => "Zustand unbekannt".into(),
+                PowerView::On => "Eingeschaltet".into(),
+                PowerView::Rest => "Im Ruhemodus".into(),
+                PowerView::Waking => "Wird eingeschaltet …".into(),
+                PowerView::Unreachable(e) => format!("Nicht erreichbar: {e}"),
+            }
+        }
     }
 
     struct State {
@@ -71,6 +94,9 @@ mod ui {
         capture_ready: bool,
         /// Whether keyboard and mouse go to the PS5 right now.
         capturing: bool,
+        // power of the paired PS5
+        power: PowerView,
+        power_busy: bool,
     }
 
     impl Default for State {
@@ -106,6 +132,8 @@ mod ui {
                 updating: false,
                 capture_ready: false,
                 capturing: false,
+                power: PowerView::Unknown,
+                power_busy: false,
             }
         }
     }
@@ -294,6 +322,7 @@ mod ui {
                         s.cfg = cfg;
                         s.pin = TextEdit::new("");
                         s.message = "Gekoppelt. Du kannst jetzt verbinden.".into();
+                        check_power(s);
                     }
                     Err(e) => s.message = format!("Koppeln fehlgeschlagen: {e:#}"),
                 }
@@ -329,6 +358,97 @@ mod ui {
                 }
             });
         });
+    }
+
+    /// Asks the paired PS5 whether it is on (in the background).
+    fn check_power(s: &mut State) {
+        if s.power_busy || s.cfg.credentials().is_err() {
+            return;
+        }
+        s.power_busy = true;
+        let cfg = s.cfg.clone();
+        std::thread::spawn(move || {
+            let res = power::status(&cfg);
+            later(move |s| {
+                s.power_busy = false;
+                s.power = match res {
+                    Ok((_, Power::On)) => PowerView::On,
+                    Ok((_, Power::Rest)) => PowerView::Rest,
+                    Err(e) => PowerView::Unreachable(format!("{e:#}")),
+                };
+            });
+        });
+    }
+
+    fn wake(s: &mut State) {
+        if s.power_busy {
+            return;
+        }
+        s.power_busy = true;
+        s.power = PowerView::Waking;
+        let cfg = s.cfg.clone();
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<PowerView> {
+                power::wake(&cfg)?;
+                // the PS5 takes a while; ask until it is on (wakeups are UDP: repeat them)
+                for i in 0..20 {
+                    std::thread::sleep(Duration::from_secs(2));
+                    if let Ok((_, Power::On)) = power::status(&cfg) {
+                        return Ok(PowerView::On);
+                    }
+                    if i % 5 == 4 {
+                        let _ = power::wake(&cfg);
+                    }
+                }
+                anyhow::bail!("die PS5 ist nicht aufgewacht (Einstellungen › System › Energiesparen › „Einschalten der PS5 über das Netzwerk aktivieren“ an?)")
+            })();
+            later(move |s| {
+                s.power_busy = false;
+                match res {
+                    Ok(p) => s.power = p,
+                    Err(e) => {
+                        s.power = PowerView::Unknown;
+                        s.message = format!("Einschalten fehlgeschlagen: {e:#}");
+                    }
+                }
+            });
+        });
+    }
+
+    fn rest(s: &mut State) {
+        if s.power_busy {
+            return;
+        }
+        // rest mode needs its own control connection: end ours first
+        stop(s);
+        s.power_busy = true;
+        let cfg = s.cfg.clone();
+        std::thread::spawn(move || {
+            let res = power::sleep(&cfg);
+            later(move |s| {
+                s.power_busy = false;
+                match res {
+                    Ok(_) => s.power = PowerView::Rest,
+                    Err(e) => s.message = format!("Ruhemodus fehlgeschlagen: {e:#}"),
+                }
+            });
+        });
+    }
+
+    fn power_card(s: &State, t: Theme) -> El {
+        let paired = s.cfg.credentials().is_ok();
+        let line = if paired { s.power.label() } else { "Erst koppeln, dann lässt sich die PS5 hier ein- und ausschalten.".into() };
+        let mut c = card("power", t)
+            .child(text("PS5").font(type_::TITLE).color(t.text))
+            .child(text(line).font(type_::LABEL).color(if s.power == PowerView::On { accent() } else { t.text_secondary }));
+        if paired {
+            let busy = s.power_busy;
+            c = c.child(row().gap(10.0)
+                .child(button(if busy && s.power == PowerView::Waking { "Schalte ein …" } else { "Einschalten" }, "wake", t, s.power == PowerView::Rest, wake))
+                .child(button("Ruhemodus", "rest", t, false, rest))
+                .child(button(if busy && s.power != PowerView::Waking { "Prüfe …" } else { "Zustand prüfen" }, "power-check", t, false, check_power)));
+        }
+        c
     }
 
     fn console_label(c: &FoundConsole) -> String {
@@ -458,7 +578,7 @@ mod ui {
             .child(row().gap(10.0).center_y()
                 .child(field("pin", &s.pin, "8-stelliger Code", t, |s| &mut s.pin))
                 .child(button("Koppeln", "pair", t, true, pair)));
-        col().gap(16.0).child(connection).child(pairing)
+        col().gap(16.0).child(power_card(s, t)).child(connection).child(pairing)
     }
 
     fn keys_tab(s: &State, t: Theme) -> El {
@@ -579,6 +699,7 @@ mod ui {
             // Look for consoles right away so pairing needs no IP address.
             std::thread::sleep(Duration::from_millis(300));
             later(search);
+            later(check_power);
             loop {
                 std::thread::sleep(Duration::from_millis(500));
                 if let Some(h) = HANDLE.get() {

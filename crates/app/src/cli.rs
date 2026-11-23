@@ -3,12 +3,10 @@
 #[cfg(windows)]
 use crate::runner;
 use crate::{
-    config, describe_consoles, http, logbuf, parse_account_id, pick_for_pairing, psn, regist,
-    resolve_console, resolve_host, session, set_console_value, update, DISCOVER_WAIT,
+    config, describe_consoles, http, logbuf, parse_account_id, pick_for_pairing, power, psn,
+    regist, resolve_host, set_console_value, update, DISCOVER_WAIT,
 };
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -336,29 +334,25 @@ Your PSN account ID: {}   (as a number: {})",
         }
         cmd => {
             let cfg = Config::load(&config_path)?;
-            let creds = cfg.credentials()?;
-            let ip = resolve_console(&cfg.console)?;
             match cmd {
                 Command::Wake => {
-                    regist::wakeup(ip, &creds)?;
+                    let ip = power::wake(&cfg)?;
                     println!("wakeup sent to {ip}");
                     Ok(())
                 }
                 Command::Status => {
-                    println!("{}", regist::probe(ip)?);
+                    let (ip, p) = power::status(&cfg)?;
+                    println!(
+                        "{ip}: {}",
+                        match p {
+                            power::Power::On => "on",
+                            power::Power::Rest => "rest mode",
+                        }
+                    );
                     Ok(())
                 }
                 Command::Sleep => {
-                    let nonce = session::request_session(ip, &creds)?;
-                    let ctrl = session::Ctrl::connect(
-                        ip,
-                        &nonce,
-                        &creds,
-                        cfg.console.login_pin.as_deref(),
-                        false,
-                    )?;
-                    ctrl.goto_bed()?;
-                    thread::sleep(Duration::from_millis(500));
+                    power::sleep(&cfg)?;
                     println!("rest mode requested");
                     Ok(())
                 }

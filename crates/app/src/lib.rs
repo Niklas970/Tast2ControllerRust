@@ -5,6 +5,7 @@
 pub mod cli;
 pub mod config;
 pub mod input;
+pub mod power;
 pub mod psn;
 #[cfg(windows)]
 pub mod runner;
