@@ -9,6 +9,14 @@ Maus und Tastatur als DualSense für die PS5 (Remote Play, nur Eingabe, kein Vid
 - `crates/input`: Maus-Engine (Kurve, radiale Anti-Deadzone, ADS, Glättung)
 - `crates/app` (geplant): Windows-Eingabe, Tray, Rune-Oberfläche
 
+## Updates
+Beim Start prüft das Fenster, ob auf GitHub eine neuere Release liegt, und zeigt dann „Jetzt aktualisieren“. Das lädt die EXE, prüft sie gegen die veröffentlichte SHA-256, ersetzt die laufende Datei (die alte wird als `.old` beiseitegelegt und beim nächsten Start gelöscht) und startet neu. Auf der Kommandozeile:
+```
+tast2controller update --check
+tast2controller update
+```
+Neue Release: Version in `Cargo.toml` und `gui/Cargo.toml` erhöhen, dann den Workflow „Release“ mit passendem Tag (z. B. `v0.2.0`) starten; der Workflow bricht ab, wenn Tag und Version nicht zusammenpassen.
+
 ## Entwickeln
 ```
 cargo fmt

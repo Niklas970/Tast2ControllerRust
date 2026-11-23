@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, e.g. v0.1.0"
+        description: "Release tag, e.g. v0.2.0"
         required: true
-        default: "v0.1.0"
+        default: "v0.2.0"
 
 permissions:
   contents: write
@@ -25,6 +25,14 @@ jobs:
       - name: Build
         working-directory: gui
         run: cargo build --release
+      - name: Check that the tag matches the program version
+        shell: pwsh
+        run: |
+          $v = (& gui/target/release/tast2controller.exe --version).Split(' ')[-1].Trim()
+          if ("v$v" -ne "${{ inputs.tag }}") {
+            Write-Error "Tag ${{ inputs.tag }} does not match the program version $v (bump version in Cargo.toml and gui/Cargo.toml); the updater compares these."
+            exit 1
+          }
       - name: Checksum
         shell: pwsh
         run: |
