@@ -29,7 +29,7 @@ mod ui {
     use tast2controller::input::mapper::Mapper;
     use tast2controller::input::windows;
     use tast2controller::power::{self, Power};
-    use tast2controller::templates;
+    use tast2controller::{templates, tray};
     use tast2controller::runner::{CaptureIn, Runner};
     use tast2controller::regist::FoundConsole;
     use tast2controller::{DISCOVER_WAIT, cli, pick_for_pairing, psn, regist, resolve_host, update};
@@ -98,6 +98,9 @@ mod ui {
         // power of the paired PS5
         power: PowerView,
         power_busy: bool,
+        /// The settings window, once found (for the tray and for capturing).
+        hwnd: Option<isize>,
+        tray: Option<tray::Tray>,
     }
 
     impl Default for State {
@@ -135,6 +138,8 @@ mod ui {
                 capturing: false,
                 power: PowerView::Unknown,
                 power_busy: false,
+                hwnd: None,
+                tray: None,
             }
         }
     }
@@ -217,13 +222,63 @@ mod ui {
 
     /// This window's handle, prepared for capturing. Runs on the UI thread, which owns the window.
     fn capture_target(s: &mut State) -> anyhow::Result<isize> {
-        let hwnd = windows::window_of_current_thread()
+        let hwnd = s.hwnd.or_else(windows::window_of_current_thread)
             .ok_or_else(|| anyhow::anyhow!("settings window not found"))?;
         if !s.capture_ready {
             windows::install_in_window(hwnd)?;
             s.capture_ready = true;
         }
         Ok(hwnd)
+    }
+
+    /// Finds the settings window, makes minimizing hide it to the tray and shows the tray icon.
+    /// Runs on the UI thread; retries a few times while the window isn't visible yet.
+    fn init_window(s: &mut State, tries: u32) {
+        let Some(hwnd) = windows::window_of_current_thread() else {
+            if tries > 0 {
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    later(move |s| init_window(s, tries - 1));
+                });
+            }
+            return;
+        };
+        s.hwnd = Some(hwnd);
+        if let Err(e) = tray::hide_on_minimize(hwnd) {
+            log::warn!("minimize to tray: {e:#}");
+        }
+        match tray::Tray::spawn("Tast2ControllerRust: nicht verbunden", on_tray) {
+            Ok(t) => s.tray = Some(t),
+            Err(e) => log::warn!("tray icon: {e:#}"),
+        }
+        if s.cfg.ui.start_in_tray && s.tray.is_some() {
+            tray::hide_window(hwnd);
+        }
+        if s.cfg.ui.connect_on_launch && s.cfg.credentials().is_ok() {
+            start(s);
+        }
+    }
+
+    fn on_tray(ev: tray::TrayEvent) {
+        match ev {
+            tray::TrayEvent::Open => later(|s| {
+                if let Some(h) = s.hwnd {
+                    tray::show_window(h);
+                }
+            }),
+            tray::TrayEvent::ToggleConnection => later(|s| {
+                if s.runner.is_some() {
+                    stop(s);
+                } else {
+                    start(s);
+                }
+            }),
+            tray::TrayEvent::Quit => later(|s| {
+                stop(s);
+                s.tray = None;
+                std::process::exit(0);
+            }),
+        }
     }
 
     fn take_input(s: &mut State) {
@@ -620,7 +675,15 @@ mod ui {
             .child(row().gap(10.0).center_y()
                 .child(field("pin", &s.pin, "8-stelliger Code", t, |s| &mut s.pin))
                 .child(button("Koppeln", "pair", t, true, pair)));
-        col().gap(16.0).child(power_card(s, t)).child(connection).child(pairing)
+        let ui = &s.cfg.ui;
+        let program = card("program", t)
+            .child(text("Programm").font(type_::TITLE).color(t.text))
+            .child(text("Minimieren legt das Fenster in den Infobereich (Tray); dort per Rechtsklick verbinden, trennen oder beenden.").font(type_::LABEL).color(t.text_secondary))
+            .child(row().gap(8.0).flex_wrap()
+                .child(chip("Im Tray starten", "ui-tray".into(), ui.start_in_tray, t, |s: &mut State| s.cfg.ui.start_in_tray = !s.cfg.ui.start_in_tray))
+                .child(chip("Beim Start verbinden", "ui-autoconnect".into(), ui.connect_on_launch, t, |s: &mut State| s.cfg.ui.connect_on_launch = !s.cfg.ui.connect_on_launch)))
+            .child(text("Wirkt nach „Config speichern“ beim nächsten Programmstart.").font(type_::LABEL).color(t.text_secondary));
+        col().gap(16.0).child(power_card(s, t)).child(connection).child(pairing).child(program)
     }
 
     fn keys_tab(s: &State, t: Theme) -> El {
@@ -750,6 +813,7 @@ mod ui {
         std::thread::spawn(|| {
             // Look for consoles right away so pairing needs no IP address.
             std::thread::sleep(Duration::from_millis(300));
+            later(|s| init_window(s, 10));
             later(search);
             later(check_power);
             loop {
@@ -763,6 +827,9 @@ mod ui {
                                 s.runner = None;
                                 s.capturing = false;
                             }
+                        }
+                        if let Some(tray) = &s.tray {
+                            tray.set_status(&format!("Tast2ControllerRust: {}", s.status), s.runner.is_some());
                         }
                     });
                 }
