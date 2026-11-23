@@ -2,6 +2,7 @@
 // Several APIs are only used by the settings window.
 #![allow(dead_code)]
 
+pub mod cli;
 pub mod config;
 pub mod input;
 pub mod psn;

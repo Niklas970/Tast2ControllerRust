@@ -1,14 +1,13 @@
-//! tast2controller: an input-only PS5 Remote Play client for Windows.
-//! Sends keyboard and mouse input to a PS5 as a DualSense; never decodes video or audio.
+//! Command line of the single `tast2controller` program (the GUI crate starts it when arguments are given).
 
+#[cfg(windows)]
+use crate::runner;
+use crate::{
+    config, http, logbuf, parse_account_id, psn, regist, resolve_host, session, set_console_value,
+};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
-#[cfg(windows)]
-use tast2controller::runner;
-use tast2controller::{
-    config, http, logbuf, parse_account_id, psn, regist, resolve_host, session, set_console_value,
-};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -68,7 +67,7 @@ enum Command {
     Keys,
 }
 
-fn default_config_path() -> PathBuf {
+pub fn default_config_path() -> PathBuf {
     let name = "tast2controller.toml";
     let cwd = PathBuf::from(name);
     if cwd.exists() {
@@ -89,10 +88,35 @@ fn default_config_path() -> PathBuf {
     }
 }
 
+/// Stores the result of a registration in the config file (created if missing), keeping comments.
+pub fn save_registration(config_path: &Path, host: &str, reg: &regist::Registered) -> Result<()> {
+    let mut doc = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        config::DEFAULT_CONFIG.to_string()
+    };
+    doc = set_console_value(&doc, "host", host);
+    doc = set_console_value(
+        &doc,
+        "regist_key",
+        &http::hex(reg.creds.regist_key_trimmed()),
+    );
+    doc = set_console_value(&doc, "rp_key", &http::hex(&reg.creds.morning));
+    if !reg.nickname.is_empty() {
+        doc = set_console_value(&doc, "nickname", &reg.nickname);
+    }
+    toml::from_str::<Config>(&doc).context("updated config does not parse")?;
+    if let Some(dir) = config_path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(config_path, doc)?;
+    Ok(())
+}
+
 /// Detaches from the console window when it was opened just for this process
 /// (started from Explorer), so the tray app doesn't leave a console behind.
 #[cfg(windows)]
-fn detach_own_console() {
+pub fn detach_own_console() {
     use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
     let mut pids = [0u32; 2];
     unsafe {
@@ -112,7 +136,7 @@ fn run_session(_cfg: &Config) -> Result<()> {
     bail!("capturing keyboard and mouse is only implemented for Windows")
 }
 
-fn main() {
+pub fn main() {
     let cli = Cli::parse();
     let level = match cli.verbose {
         0 => "info",
@@ -135,7 +159,7 @@ fn real_main(cli: Cli) -> Result<()> {
         Command::Gui => {
             #[cfg(windows)]
             detach_own_console();
-            bail!("the settings window is not built yet; use `run`")
+            bail!("start the program without arguments to open the settings window")
         }
         Command::Init { force } => {
             if config_path.exists() && !force {
@@ -161,23 +185,7 @@ fn real_main(cli: Cli) -> Result<()> {
             let account = parse_account_id(&account_id)?;
             log::info!("registering with {ip} ...");
             let reg = regist::register(ip, pin, account)?;
-            let mut doc = if config_path.exists() {
-                std::fs::read_to_string(&config_path)?
-            } else {
-                config::DEFAULT_CONFIG.to_string()
-            };
-            doc = set_console_value(&doc, "host", &host);
-            doc = set_console_value(
-                &doc,
-                "regist_key",
-                &http::hex(reg.creds.regist_key_trimmed()),
-            );
-            doc = set_console_value(&doc, "rp_key", &http::hex(&reg.creds.morning));
-            if !reg.nickname.is_empty() {
-                doc = set_console_value(&doc, "nickname", &reg.nickname);
-            }
-            toml::from_str::<Config>(&doc).context("updated config does not parse")?;
-            std::fs::write(&config_path, doc)?;
+            save_registration(&config_path, &host, &reg)?;
             println!(
                 "registered with {} (MAC {}); credentials saved to {}",
                 if reg.nickname.is_empty() {

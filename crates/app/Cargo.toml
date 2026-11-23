@@ -9,10 +9,6 @@ description = "Keyboard and mouse as a DualSense for a PS5 (Remote Play, input o
 name = "tast2controller"
 path = "src/lib.rs"
 
-[[bin]]
-name = "tast2controller"
-path = "src/main.rs"
-
 [dependencies]
 tast2controller-core = { path = "../core" }
 tast2controller-input = { path = "../input" }
