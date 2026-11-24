@@ -5,9 +5,13 @@
 pub mod cli;
 pub mod config;
 pub mod input;
+pub mod power;
 pub mod psn;
 #[cfg(windows)]
 pub mod runner;
+pub mod templates;
+#[cfg(windows)]
+pub mod tray;
 pub mod update;
 
 pub use tast2controller_core::{controller, http, logbuf, regist, session, stream};

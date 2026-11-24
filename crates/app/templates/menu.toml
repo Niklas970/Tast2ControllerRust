@@ -1,0 +1,27 @@
+# Template "Menü": keys and mouse for menus and the PS5 home screen.
+
+[[profile]]
+name = "menu"
+
+[profile.mouse]
+target = "none"
+
+[profile.bind]
+W = "dpad_up"
+S = "dpad_down"
+A = "dpad_left"
+D = "dpad_right"
+Up = "dpad_up"
+Down = "dpad_down"
+Left = "dpad_left"
+Right = "dpad_right"
+Enter = "cross"
+Space = "cross"
+MouseLeft = "cross"
+Backspace = "circle"
+MouseRight = "circle"
+Escape = "options"
+Q = "l1"
+E = "r1"
+Tab = "touchpad"
+Home = "ps"

@@ -27,6 +27,9 @@ mod ui {
     use rune::{App, AppHandle, AppSpec, Color, Cx, El, TextEdit, col, row, text, text_input};
     use tast2controller::config::{Binding, Config, MouseTarget};
     use tast2controller::input::mapper::Mapper;
+    use tast2controller::input::windows;
+    use tast2controller::power::{self, Power};
+    use tast2controller::{templates, tray};
     use tast2controller::runner::{CaptureIn, Runner};
     use tast2controller::regist::FoundConsole;
     use tast2controller::{DISCOVER_WAIT, cli, pick_for_pairing, psn, regist, resolve_host, update};
@@ -39,6 +42,28 @@ mod ui {
         Connect,
         Keys,
         Mouse,
+    }
+
+    /// What the settings window knows about the paired PS5's power.
+    #[derive(Clone, PartialEq)]
+    enum PowerView {
+        Unknown,
+        On,
+        Rest,
+        Waking,
+        Unreachable(String),
+    }
+
+    impl PowerView {
+        fn label(&self) -> String {
+            match self {
+                PowerView::Unknown => "Zustand unbekannt".into(),
+                PowerView::On => "Eingeschaltet".into(),
+                PowerView::Rest => "Im Ruhemodus".into(),
+                PowerView::Waking => "Wird eingeschaltet …".into(),
+                PowerView::Unreachable(e) => format!("Nicht erreichbar: {e}"),
+            }
+        }
     }
 
     struct State {
@@ -66,6 +91,16 @@ mod ui {
         // self-update
         update: Option<update::Release>,
         updating: bool,
+        /// Whether this window feeds the capture host (subclassed once, on first connect).
+        capture_ready: bool,
+        /// Whether keyboard and mouse go to the PS5 right now.
+        capturing: bool,
+        // power of the paired PS5
+        power: PowerView,
+        power_busy: bool,
+        /// The settings window, once found (for the tray and for capturing).
+        hwnd: Option<isize>,
+        tray: Option<tray::Tray>,
     }
 
     impl Default for State {
@@ -99,6 +134,12 @@ mod ui {
                 bind_action: TextEdit::new(""),
                 update: None,
                 updating: false,
+                capture_ready: false,
+                capturing: false,
+                power: PowerView::Unknown,
+                power_busy: false,
+                hwnd: None,
+                tray: None,
             }
         }
     }
@@ -159,12 +200,90 @@ mod ui {
             s.message = format!("{e:#}");
             return;
         }
-        match Runner::start(&s.cfg, CaptureIn::OwnWindow) {
+        // Capture in this window; fall back to the small capture window if that fails.
+        let capture_in = match capture_target(s) {
+            Ok(hwnd) => CaptureIn::Window(hwnd),
+            Err(e) => {
+                log::warn!("capturing in the settings window failed, using an own window: {e:#}");
+                CaptureIn::OwnWindow
+            }
+        };
+        match Runner::start(&s.cfg, capture_in) {
             Ok(r) => {
                 s.runner = Some(r);
-                s.message.clear();
+                s.message = format!(
+                    "Verbindung wird aufgebaut. {} gibt Maus und Tastatur frei oder holt sie zurück, {} trennt.",
+                    s.cfg.input.capture_toggle, s.cfg.input.quit
+                );
             }
             Err(e) => s.message = format!("Start fehlgeschlagen: {e:#}"),
+        }
+    }
+
+    /// This window's handle, prepared for capturing. Runs on the UI thread, which owns the window.
+    fn capture_target(s: &mut State) -> anyhow::Result<isize> {
+        let hwnd = s.hwnd.or_else(windows::window_of_current_thread)
+            .ok_or_else(|| anyhow::anyhow!("settings window not found"))?;
+        if !s.capture_ready {
+            windows::install_in_window(hwnd)?;
+            s.capture_ready = true;
+        }
+        Ok(hwnd)
+    }
+
+    /// Finds the settings window, makes minimizing hide it to the tray and shows the tray icon.
+    /// Runs on the UI thread; retries a few times while the window isn't visible yet.
+    fn init_window(s: &mut State, tries: u32) {
+        let Some(hwnd) = windows::window_of_current_thread() else {
+            if tries > 0 {
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    later(move |s| init_window(s, tries - 1));
+                });
+            }
+            return;
+        };
+        s.hwnd = Some(hwnd);
+        if let Err(e) = tray::hide_on_minimize(hwnd) {
+            log::warn!("minimize to tray: {e:#}");
+        }
+        match tray::Tray::spawn("Tast2ControllerRust: nicht verbunden", on_tray) {
+            Ok(t) => s.tray = Some(t),
+            Err(e) => log::warn!("tray icon: {e:#}"),
+        }
+        if s.cfg.ui.start_in_tray && s.tray.is_some() {
+            tray::hide_window(hwnd);
+        }
+        if s.cfg.ui.connect_on_launch && s.cfg.credentials().is_ok() {
+            start(s);
+        }
+    }
+
+    fn on_tray(ev: tray::TrayEvent) {
+        match ev {
+            tray::TrayEvent::Open => later(|s| {
+                if let Some(h) = s.hwnd {
+                    tray::show_window(h);
+                }
+            }),
+            tray::TrayEvent::ToggleConnection => later(|s| {
+                if s.runner.is_some() {
+                    stop(s);
+                } else {
+                    start(s);
+                }
+            }),
+            tray::TrayEvent::Quit => later(|s| {
+                stop(s);
+                s.tray = None;
+                std::process::exit(0);
+            }),
+        }
+    }
+
+    fn take_input(s: &mut State) {
+        if let Some(r) = &s.runner {
+            r.set_capture(true);
         }
     }
 
@@ -174,6 +293,7 @@ mod ui {
             let _ = r.stop_and_wait();
         }
         s.status = "Nicht verbunden".into();
+        s.capturing = false;
     }
 
     fn later(f: impl FnOnce(&mut State) + Send + 'static) {
@@ -258,6 +378,7 @@ mod ui {
                         s.cfg = cfg;
                         s.pin = TextEdit::new("");
                         s.message = "Gekoppelt. Du kannst jetzt verbinden.".into();
+                        check_power(s);
                     }
                     Err(e) => s.message = format!("Koppeln fehlgeschlagen: {e:#}"),
                 }
@@ -277,12 +398,11 @@ mod ui {
                 match res {
                     Ok(found) => {
                         // preselect the console when the choice is clear
-                        if s.host.text.trim().is_empty()
-                            || !found.iter().any(|c| c.ip.to_string() == s.host.text.trim())
+                        if (s.host.text.trim().is_empty()
+                            || !found.iter().any(|c| c.ip.to_string() == s.host.text.trim()))
+                            && let Ok(c) = pick_for_pairing(&found)
                         {
-                            if let Ok(c) = pick_for_pairing(&found) {
-                                s.host = TextEdit::new(c.ip.to_string());
-                            }
+                            s.host = TextEdit::new(c.ip.to_string());
                         }
                         if found.is_empty() {
                             s.message = "Keine PS5 im Netzwerk gefunden. Ist sie an und im selben Netz? Sonst die IP unten eintragen.".into();
@@ -293,6 +413,97 @@ mod ui {
                 }
             });
         });
+    }
+
+    /// Asks the paired PS5 whether it is on (in the background).
+    fn check_power(s: &mut State) {
+        if s.power_busy || s.cfg.credentials().is_err() {
+            return;
+        }
+        s.power_busy = true;
+        let cfg = s.cfg.clone();
+        std::thread::spawn(move || {
+            let res = power::status(&cfg);
+            later(move |s| {
+                s.power_busy = false;
+                s.power = match res {
+                    Ok((_, Power::On)) => PowerView::On,
+                    Ok((_, Power::Rest)) => PowerView::Rest,
+                    Err(e) => PowerView::Unreachable(format!("{e:#}")),
+                };
+            });
+        });
+    }
+
+    fn wake(s: &mut State) {
+        if s.power_busy {
+            return;
+        }
+        s.power_busy = true;
+        s.power = PowerView::Waking;
+        let cfg = s.cfg.clone();
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<PowerView> {
+                power::wake(&cfg)?;
+                // the PS5 takes a while; ask until it is on (wakeups are UDP: repeat them)
+                for i in 0..20 {
+                    std::thread::sleep(Duration::from_secs(2));
+                    if let Ok((_, Power::On)) = power::status(&cfg) {
+                        return Ok(PowerView::On);
+                    }
+                    if i % 5 == 4 {
+                        let _ = power::wake(&cfg);
+                    }
+                }
+                anyhow::bail!("die PS5 ist nicht aufgewacht (Einstellungen › System › Energiesparen › „Einschalten der PS5 über das Netzwerk aktivieren“ an?)")
+            })();
+            later(move |s| {
+                s.power_busy = false;
+                match res {
+                    Ok(p) => s.power = p,
+                    Err(e) => {
+                        s.power = PowerView::Unknown;
+                        s.message = format!("Einschalten fehlgeschlagen: {e:#}");
+                    }
+                }
+            });
+        });
+    }
+
+    fn rest(s: &mut State) {
+        if s.power_busy {
+            return;
+        }
+        // rest mode needs its own control connection: end ours first
+        stop(s);
+        s.power_busy = true;
+        let cfg = s.cfg.clone();
+        std::thread::spawn(move || {
+            let res = power::sleep(&cfg);
+            later(move |s| {
+                s.power_busy = false;
+                match res {
+                    Ok(_) => s.power = PowerView::Rest,
+                    Err(e) => s.message = format!("Ruhemodus fehlgeschlagen: {e:#}"),
+                }
+            });
+        });
+    }
+
+    fn power_card(s: &State, t: Theme) -> El {
+        let paired = s.cfg.credentials().is_ok();
+        let line = if paired { s.power.label() } else { "Erst koppeln, dann lässt sich die PS5 hier ein- und ausschalten.".into() };
+        let mut c = card("power", t)
+            .child(text("PS5").font(type_::TITLE).color(t.text))
+            .child(text(line).font(type_::LABEL).color(if s.power == PowerView::On { accent() } else { t.text_secondary }));
+        if paired {
+            let busy = s.power_busy;
+            c = c.child(row().gap(10.0)
+                .child(button(if busy && s.power == PowerView::Waking { "Schalte ein …" } else { "Einschalten" }, "wake", t, s.power == PowerView::Rest, wake))
+                .child(button("Ruhemodus", "rest", t, false, rest))
+                .child(button(if busy && s.power != PowerView::Waking { "Prüfe …" } else { "Zustand prüfen" }, "power-check", t, false, check_power)));
+        }
+        c
     }
 
     fn console_label(c: &FoundConsole) -> String {
@@ -370,18 +581,73 @@ mod ui {
         }
     }
 
+    fn apply_template(s: &mut State, n: usize) {
+        let Some(tp) = templates::TEMPLATES.get(n) else { return };
+        let before = s.cfg.profiles.clone();
+        let res = templates::apply(&mut s.cfg, tp).and_then(|replaced| Mapper::new(&s.cfg).map(|_| replaced));
+        match res {
+            Ok(replaced) => {
+                let first = tp.profiles().ok().and_then(|p| p.first().map(|p| p.name.clone()));
+                if let Some(i) = first.and_then(|f| s.cfg.profiles.iter().position(|p| p.name.eq_ignore_ascii_case(&f))) {
+                    s.sel = i;
+                }
+                s.message = if replaced.is_empty() {
+                    format!("Vorlage „{}“ hinzugefügt; mit „Config speichern“ übernehmen.", tp.label)
+                } else {
+                    format!("Vorlage „{}“ übernommen, ersetzt: {}. Mit „Config speichern“ übernehmen.", tp.label, replaced.join(", "))
+                };
+            }
+            Err(e) => {
+                s.cfg.profiles = before;
+                s.message = format!("Vorlage passt nicht zur Config: {e:#}");
+            }
+        }
+    }
+
+    fn remove_profile(s: &mut State) {
+        let i = sel_index(s);
+        if s.cfg.profiles.len() <= 1 {
+            s.message = "Das letzte Profil bleibt stehen.".into();
+            return;
+        }
+        let removed = s.cfg.profiles.remove(i);
+        if let Err(e) = Mapper::new(&s.cfg) {
+            s.cfg.profiles.insert(i, removed);
+            s.message = format!("Profil wird noch gebraucht: {e:#}");
+            return;
+        }
+        if s.cfg.input.start_profile.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&removed.name)) {
+            s.cfg.input.start_profile = None;
+        }
+        s.sel = i.saturating_sub(1);
+        s.message = format!("Profil „{}“ gelöscht; mit „Config speichern“ übernehmen.", removed.name);
+    }
+
     fn connect_tab(s: &State, t: Theme) -> El {
         let running = s.runner.is_some();
         let connection = card("connection", t)
             .child(text("Verbindung").font(type_::TITLE).color(t.text))
-            .child(text(s.status.clone()).font(type_::LABEL).color(t.text_secondary))
-            .child(row().gap(10.0)
-                .child(if running {
-                    button("Trennen", "stop", t, false, stop)
-                } else {
-                    button("Verbinden", "start", t, true, start)
-                })
-                .child(button("Config speichern", "save", t, false, save)));
+            .child(text(s.status.clone()).font(type_::LABEL).color(t.text_secondary));
+        let connection = if running {
+            let (line, color) = if s.capturing {
+                (format!("Maus und Tastatur steuern die PS5. {} gibt sie frei, {} trennt.",
+                    s.cfg.input.capture_toggle, s.cfg.input.quit), accent())
+            } else {
+                (format!("Maus und Tastatur sind frei. „Steuerung übernehmen“ oder {} schickt sie an die PS5.",
+                    s.cfg.input.capture_toggle), t.text_secondary)
+            };
+            connection.child(text(line).font(type_::LABEL).color(color))
+        } else {
+            connection
+        };
+        let mut buttons = row().gap(10.0);
+        buttons = if running {
+            buttons.child(button("Steuerung übernehmen", "capture", t, !s.capturing, take_input))
+                .child(button("Trennen", "stop", t, false, stop))
+        } else {
+            buttons.child(button("Verbinden", "start", t, true, start))
+        };
+        let connection = connection.child(buttons.child(button("Config speichern", "save", t, false, save)));
 
         let paired = s.cfg.credentials().is_ok();
         let mut consoles = row().gap(8.0).flex_wrap().center_y();
@@ -409,7 +675,15 @@ mod ui {
             .child(row().gap(10.0).center_y()
                 .child(field("pin", &s.pin, "8-stelliger Code", t, |s| &mut s.pin))
                 .child(button("Koppeln", "pair", t, true, pair)));
-        col().gap(16.0).child(connection).child(pairing)
+        let ui = &s.cfg.ui;
+        let program = card("program", t)
+            .child(text("Programm").font(type_::TITLE).color(t.text))
+            .child(text("Minimieren legt das Fenster in den Infobereich (Tray); dort per Rechtsklick verbinden, trennen oder beenden.").font(type_::LABEL).color(t.text_secondary))
+            .child(row().gap(8.0).flex_wrap()
+                .child(chip("Im Tray starten", "ui-tray".into(), ui.start_in_tray, t, |s: &mut State| s.cfg.ui.start_in_tray = !s.cfg.ui.start_in_tray))
+                .child(chip("Beim Start verbinden", "ui-autoconnect".into(), ui.connect_on_launch, t, |s: &mut State| s.cfg.ui.connect_on_launch = !s.cfg.ui.connect_on_launch)))
+            .child(text("Wirkt nach „Config speichern“ beim nächsten Programmstart.").font(type_::LABEL).color(t.text_secondary));
+        col().gap(16.0).child(power_card(s, t)).child(connection).child(pairing).child(program)
     }
 
     fn keys_tab(s: &State, t: Theme) -> El {
@@ -442,7 +716,17 @@ mod ui {
                 s.cfg.input.start_profile = Some(p.name.clone());
             }
         });
-        col().gap(14.0).child(chips).child(row().child(start_btn)).child(card("bind-list", t).child(list)).child(add)
+        let mut presets = card("templates", t)
+            .child(text("Vorlagen").font(type_::TITLE).color(t.text))
+            .child(text("Fügt fertige Profile hinzu; ein Profil mit gleichem Namen wird ersetzt. Wirkt nach „Config speichern“.").font(type_::LABEL).color(t.text_secondary));
+        for (n, tp) in templates::TEMPLATES.iter().enumerate() {
+            presets = presets.child(row().gap(10.0).center_y()
+                .child(button(tp.label, &format!("template-{n}"), t, false, move |s: &mut State| apply_template(s, n)))
+                .child(text(tp.about).font(type_::LABEL).color(t.text_secondary).grow(1.0)));
+        }
+        let remove_btn = button("Profil löschen", "profile-remove", t, false, remove_profile);
+        col().gap(14.0).child(chips).child(row().gap(10.0).child(start_btn).child(remove_btn))
+            .child(card("bind-list", t).child(list)).child(add).child(presets)
     }
 
     fn mouse_tab(s: &State, t: Theme) -> El {
@@ -529,16 +813,23 @@ mod ui {
         std::thread::spawn(|| {
             // Look for consoles right away so pairing needs no IP address.
             std::thread::sleep(Duration::from_millis(300));
+            later(|s| init_window(s, 10));
             later(search);
+            later(check_power);
             loop {
                 std::thread::sleep(Duration::from_millis(500));
                 if let Some(h) = HANDLE.get() {
                     h.update(|s, _| {
                         if let Some(r) = &s.runner {
                             s.status = r.run_state().phase.label();
+                            s.capturing = r.is_capturing();
                             if r.is_finished() {
                                 s.runner = None;
+                                s.capturing = false;
                             }
+                        }
+                        if let Some(tray) = &s.tray {
+                            tray.set_status(&format!("Tast2ControllerRust: {}", s.status), s.runner.is_some());
                         }
                     });
                 }

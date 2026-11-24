@@ -688,6 +688,30 @@ unsafe extern "system" fn subclass_proc(
     }
 }
 
+/// The visible top-level window of the calling thread (the settings window, when called
+/// from its UI thread). The GUI toolkit doesn't hand out its window handle, so look it up.
+pub fn window_of_current_thread() -> Option<isize> {
+    unsafe extern "system" fn each(hwnd: HWND, found: LPARAM) -> i32 {
+        let usable = IsWindowVisible(hwnd) != 0
+            && GetWindow(hwnd, GW_OWNER).is_null()
+            && (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW) == 0;
+        if usable {
+            *(found as *mut isize) = hwnd as isize;
+            return 0; // stop
+        }
+        1
+    }
+    let mut found: isize = 0;
+    unsafe {
+        EnumThreadWindows(
+            GetCurrentThreadId(),
+            Some(each),
+            &mut found as *mut isize as LPARAM,
+        )
+    };
+    (found != 0).then_some(found)
+}
+
 /// Lets sessions capture input in the settings window. Call once, on the window's thread.
 pub fn install_in_window(hwnd: isize) -> Result<()> {
     if unsafe { SetWindowSubclass(hwnd as HWND, Some(subclass_proc), 0xC41B, 0) } == 0 {
