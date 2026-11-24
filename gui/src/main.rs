@@ -28,7 +28,8 @@ mod ui {
     use tast2controller::config::{Binding, Config, MouseTarget};
     use tast2controller::input::mapper::Mapper;
     use tast2controller::runner::{CaptureIn, Runner};
-    use tast2controller::{cli, psn, regist, resolve_host, update};
+    use tast2controller::regist::FoundConsole;
+    use tast2controller::{DISCOVER_WAIT, cli, pick_for_pairing, psn, regist, resolve_host, update};
     use tast2controller_input::MouseConfig;
 
     static HANDLE: OnceLock<AppHandle<State>> = OnceLock::new();
@@ -52,9 +53,13 @@ mod ui {
         // pairing
         redirect: TextEdit,
         account: Option<u64>,
+        /// Manual IP address, only needed when the search finds nothing.
         host: TextEdit,
         pin: TextEdit,
         busy: bool,
+        /// Consoles found by the last network search.
+        found: Vec<FoundConsole>,
+        searching: bool,
         // new binding
         bind_input: TextEdit,
         bind_action: TextEdit,
@@ -88,6 +93,8 @@ mod ui {
                 host,
                 pin: TextEdit::new(""),
                 busy: false,
+                found: Vec::new(),
+                searching: false,
                 bind_input: TextEdit::new(""),
                 bind_action: TextEdit::new(""),
                 update: None,
@@ -203,7 +210,7 @@ mod ui {
                     Ok(id) => {
                         s.account = Some(id.number);
                         s.redirect = TextEdit::new("");
-                        s.message = "Account-ID geholt. Jetzt IP und Code der PS5 eintragen.".into();
+                        s.message = "Account-ID geholt. Jetzt den Code der PS5 eintragen.".into();
                     }
                     Err(e) => s.message = format!("{e:#}"),
                 }
@@ -225,7 +232,13 @@ mod ui {
         };
         let host = s.host.text.trim().to_string();
         if host.is_empty() {
-            s.message = "Bitte die IP-Adresse der PS5 eintragen.".into();
+            s.message = match pick_for_pairing(&s.found) {
+                Ok(_) => "Bitte die PS5 oben auswählen.".into(),
+                Err(_) if s.found.is_empty() => {
+                    "Keine PS5 gefunden: „PS5 suchen“ drücken oder die IP-Adresse eintragen.".into()
+                }
+                Err(_) => "Bitte die PS5 oben auswählen (sie muss eingeschaltet sein).".into(),
+            };
             return;
         }
         let path = s.path.clone();
@@ -250,6 +263,40 @@ mod ui {
                 }
             });
         });
+    }
+
+    fn search(s: &mut State) {
+        if s.searching {
+            return;
+        }
+        s.searching = true;
+        std::thread::spawn(move || {
+            let res = regist::discover(DISCOVER_WAIT);
+            later(move |s| {
+                s.searching = false;
+                match res {
+                    Ok(found) => {
+                        // preselect the console when the choice is clear
+                        if s.host.text.trim().is_empty()
+                            || !found.iter().any(|c| c.ip.to_string() == s.host.text.trim())
+                        {
+                            if let Ok(c) = pick_for_pairing(&found) {
+                                s.host = TextEdit::new(c.ip.to_string());
+                            }
+                        }
+                        if found.is_empty() {
+                            s.message = "Keine PS5 im Netzwerk gefunden. Ist sie an und im selben Netz? Sonst die IP unten eintragen.".into();
+                        }
+                        s.found = found;
+                    }
+                    Err(e) => s.message = format!("Suche fehlgeschlagen: {e:#}"),
+                }
+            });
+        });
+    }
+
+    fn console_label(c: &FoundConsole) -> String {
+        format!("{} · {} · {}", c.name, c.ip, if c.awake { "an" } else { "Ruhemodus" })
     }
 
     fn install_update(s: &mut State) {
@@ -337,6 +384,14 @@ mod ui {
                 .child(button("Config speichern", "save", t, false, save)));
 
         let paired = s.cfg.credentials().is_ok();
+        let mut consoles = row().gap(8.0).flex_wrap().center_y();
+        for c in &s.found {
+            let ip = c.ip.to_string();
+            let selected = s.host.text.trim() == ip;
+            consoles = consoles.child(chip(&console_label(c), format!("console-{ip}"), selected, t,
+                move |s: &mut State| s.host = TextEdit::new(ip.clone())));
+        }
+        consoles = consoles.child(button(if s.searching { "Suche läuft …" } else { "PS5 suchen" }, "search", t, s.found.is_empty(), search));
         let pairing = card("pairing", t)
             .child(text(if paired { "PS5 koppeln (bereits gekoppelt)" } else { "PS5 koppeln" }).font(type_::TITLE).color(t.text))
             .child(text("1. Bei Sony anmelden: dein Passwort gibt nur du im Browser bei Sony ein.").font(type_::LABEL).color(t.text_secondary))
@@ -345,9 +400,13 @@ mod ui {
                 .child(field("redirect", &s.redirect, "Adresse der Seite „redirect“ hier einfügen", t, |s| &mut s.redirect))
                 .child(button("Account-ID holen", "get-account", t, false, fetch_account)))
             .child(text(if s.account.is_some() { "Account-ID: geholt" } else { "Account-ID: noch nicht geholt" }).font(type_::LABEL).color(t.text))
-            .child(text("2. PS5: Einstellungen › System › Remote-Wiedergabe › Gerät verknüpfen zeigt den Code.").font(type_::LABEL).color(t.text_secondary))
+            .child(text("2. PS5 auswählen. Sie wird im Netzwerk gesucht, die IP musst du nur eintragen, wenn sie nicht gefunden wird.").font(type_::LABEL).color(t.text_secondary))
+            .child(consoles)
             .child(row().gap(10.0).center_y()
-                .child(field("host", &s.host, "IP-Adresse der PS5", t, |s| &mut s.host))
+                .child(text("oder IP manuell:").font(type_::LABEL).color(t.text_secondary))
+                .child(field("host", &s.host, "z. B. 192.168.1.50", t, |s| &mut s.host)))
+            .child(text("3. PS5: Einstellungen › System › Remote-Wiedergabe › Gerät verknüpfen zeigt den Code.").font(type_::LABEL).color(t.text_secondary))
+            .child(row().gap(10.0).center_y()
                 .child(field("pin", &s.pin, "8-stelliger Code", t, |s| &mut s.pin))
                 .child(button("Koppeln", "pair", t, true, pair)));
         col().gap(16.0).child(connection).child(pairing)
@@ -467,17 +526,22 @@ mod ui {
             Err(e) => log::info!("update check: {e:#}"),
         });
         // Refresh the connection status twice a second.
-        std::thread::spawn(|| loop {
-            std::thread::sleep(Duration::from_millis(500));
-            if let Some(h) = HANDLE.get() {
-                h.update(|s, _| {
-                    if let Some(r) = &s.runner {
-                        s.status = r.run_state().phase.label();
-                        if r.is_finished() {
-                            s.runner = None;
+        std::thread::spawn(|| {
+            // Look for consoles right away so pairing needs no IP address.
+            std::thread::sleep(Duration::from_millis(300));
+            later(search);
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                if let Some(h) = HANDLE.get() {
+                    h.update(|s, _| {
+                        if let Some(r) = &s.runner {
+                            s.status = r.run_state().phase.label();
+                            if r.is_finished() {
+                                s.runner = None;
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
         });
         app.run();

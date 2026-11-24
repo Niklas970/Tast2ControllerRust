@@ -29,9 +29,12 @@ pub struct Config {
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ConsoleConfig {
-    /// IP address of the PS5.
+    /// IP address of the PS5. Empty = find it on the network.
     #[serde(default)]
     pub host: String,
+    /// MAC address of the PS5 from pairing; used to find it again when its IP changes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host_id: String,
     /// `PS5-RegistKey` from registration, as hex.
     #[serde(default)]
     pub regist_key: String,

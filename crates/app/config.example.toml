@@ -1,13 +1,16 @@
 # tast2controller configuration
 #
-# 1. Register once:  tast2controller register --host 192.168.1.50 --pin 12345678 --account-id <id>
-#    (fills in the [console] section below)
+# 1. Register once:  tast2controller register --pin 12345678 --account-id <id>
+#    (finds the PS5 on the network and fills in the [console] section below;
+#    add --host 192.168.1.50 if it isn't found)
 # 2. Play:            tast2controller
 #
 # Input names: run `tast2controller keys`, or press a key while capturing and read
 # "Last input" in the window.
 
 [console]
+# Filled in by pairing. Leave empty to find the PS5 on the network; it is also found
+# again automatically when its IP address changes.
 host = ""
 regist_key = ""
 rp_key = ""
