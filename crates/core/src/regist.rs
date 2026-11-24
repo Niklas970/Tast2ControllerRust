@@ -191,12 +191,46 @@ pub fn probe(ip: IpAddr) -> Result<String> {
 }
 
 /// A console that answered the network search.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FoundConsole {
     pub ip: IpAddr,
     pub name: String,
     /// true = running, false = rest mode
     pub awake: bool,
+    /// The console's MAC address as 12 upper case hex digits (`host-id`); empty if unknown.
+    pub host_id: String,
+}
+
+/// Normalizes a MAC / host id ("aa:bb:cc:dd:ee:ff", "AABBCCDDEEFF") to 12 upper case hex digits.
+pub fn normalize_host_id(s: &str) -> String {
+    s.chars()
+        .filter(char::is_ascii_hexdigit)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// Parses a discovery answer (`HTTP/1.1 200 Ok` + headers). Returns `None` for anything
+/// that isn't a PS5.
+pub fn parse_discovery_reply(text: &str, from: IpAddr) -> Option<FoundConsole> {
+    let headers = http::parse_headers(text);
+    let get = |k: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(k))
+            .map(|(_, v)| v.trim().to_string())
+    };
+    if get("host-type").as_deref() != Some("PS5") {
+        return None;
+    }
+    let status = text.lines().next().unwrap_or("");
+    Some(FoundConsole {
+        ip: from,
+        name: get("host-name").unwrap_or_else(|| "PS5".into()),
+        awake: status.contains(" 200 "),
+        host_id: get("host-id")
+            .map(|h| normalize_host_id(&h))
+            .unwrap_or_default(),
+    })
 }
 
 /// The local IPv4 address used to reach the LAN (no packet is sent).
@@ -211,6 +245,14 @@ fn local_ipv4() -> Option<std::net::Ipv4Addr> {
 
 /// Searches the local network for PS5 consoles for `wait`.
 pub fn discover(wait: Duration) -> Result<Vec<FoundConsole>> {
+    discover_until(wait, |_| false)
+}
+
+/// Searches until `wait` is over or `done` returns true for the consoles found so far.
+fn discover_until(
+    wait: Duration,
+    done: impl Fn(&[FoundConsole]) -> bool,
+) -> Result<Vec<FoundConsole>> {
     let udp = UdpSocket::bind("0.0.0.0:0")?;
     udp.set_broadcast(true)?;
     let query = b"SRCH * HTTP/1.1\ndevice-discovery-protocol-version:00030010\n";
@@ -224,7 +266,7 @@ pub fn discover(wait: Duration) -> Result<Vec<FoundConsole>> {
     let mut found: Vec<FoundConsole> = Vec::new();
     let mut next_send = Instant::now();
     let mut buf = [0u8; 1024];
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !done(&found) {
         if Instant::now() >= next_send {
             for t in &targets {
                 let _ = udp.send_to(query, SocketAddr::new(IpAddr::V4(*t), 9302));
@@ -242,25 +284,61 @@ pub fn discover(wait: Duration) -> Result<Vec<FoundConsole>> {
             continue;
         };
         let text = String::from_utf8_lossy(&buf[..n]).to_string();
-        let headers = http::parse_headers(&text);
-        let get = |k: &str| {
-            headers
-                .iter()
-                .find(|(key, _)| key == k)
-                .map(|(_, v)| v.trim().to_string())
-        };
-        if get("host-type").as_deref() != Some("PS5") || found.iter().any(|f| f.ip == from.ip()) {
+        let Some(console) = parse_discovery_reply(&text, from.ip()) else {
             continue;
+        };
+        match found.iter_mut().find(|f| f.ip == console.ip) {
+            // a console waking up answers "620" first and "200" later
+            Some(f) => *f = console,
+            None => found.push(console),
         }
-        let status = text.lines().next().unwrap_or("");
-        found.push(FoundConsole {
-            ip: from.ip(),
-            name: get("host-name").unwrap_or_else(|| "PS5".into()),
-            awake: status.contains(" 200 "),
-        });
     }
-    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.sort_by(|a, b| a.name.cmp(&b.name).then(a.ip.cmp(&b.ip)));
     Ok(found)
+}
+
+/// Searches the LAN for the console with this MAC / host id (stops as soon as it answers).
+pub fn find_by_host_id(host_id: &str, wait: Duration) -> Result<Option<FoundConsole>> {
+    let id = normalize_host_id(host_id);
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let found = discover_until(wait, |f| f.iter().any(|c| c.host_id == id))?;
+    Ok(found.into_iter().find(|c| c.host_id == id))
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    const REPLY_ON: &str = "HTTP/1.1 200 Ok\nhost-id:a1b2c3d4e5f6\nhost-type:PS5\nhost-name:PS5-123\n\
+        host-request-port:997\ndevice-discovery-protocol-version:00030010\nsystem-version:09060000\n";
+
+    #[test]
+    fn parses_running_console() {
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        let c = parse_discovery_reply(REPLY_ON, ip).unwrap();
+        assert_eq!(c.ip, ip);
+        assert_eq!(c.name, "PS5-123");
+        assert!(c.awake);
+        assert_eq!(c.host_id, "A1B2C3D4E5F6");
+    }
+
+    #[test]
+    fn parses_rest_mode_and_ignores_others() {
+        let ip: IpAddr = "10.0.0.2".parse().unwrap();
+        let standby = REPLY_ON.replace("200 Ok", "620 Server Standby");
+        assert!(!parse_discovery_reply(&standby, ip).unwrap().awake);
+        let ps4 = REPLY_ON.replace("host-type:PS5", "host-type:PS4");
+        assert!(parse_discovery_reply(&ps4, ip).is_none());
+        assert!(parse_discovery_reply("garbage", ip).is_none());
+    }
+
+    #[test]
+    fn host_id_normalizes() {
+        assert_eq!(normalize_host_id("a1:b2:c3:d4:e5:f6"), "A1B2C3D4E5F6");
+        assert_eq!(normalize_host_id(" A1-B2-C3-D4-E5-F6 "), "A1B2C3D4E5F6");
+    }
 }
 
 #[cfg(test)]
