@@ -1,0 +1,79 @@
+# Template "GTA": on foot and in a vehicle, switched with F1 / F2.
+# Based on the default GTA V layout on PlayStation; check it against the game's own
+# control settings and adjust the bindings where they differ.
+
+[[profile]]
+name = "gta"
+normalize_diagonals = true
+
+[profile.mouse]
+target = "right_stick"
+sensitivity = 0.08
+sensitivity_y = 0.8
+curve = 1.3
+anti_deadzone = 0.12
+smoothing_ms = 12
+ads_multiplier = 0.6
+
+[profile.bind]
+W = "left_stick_up"
+S = "left_stick_down"
+A = "left_stick_left"
+D = "left_stick_right"
+LCtrl = { action = "left_stick_scale", value = 0.45 }   # walk
+LShift = { action = "cross", turbo_hz = 6 }              # sprint (tapping X)
+Space = "square"       # jump
+F = "triangle"         # enter vehicle
+R = "circle"           # reload
+Q = "r1"               # cover
+Tab = "l1"             # weapon wheel
+C = "l3"               # crouch / stealth
+V = "r3"               # camera / melee
+E = "dpad_right"       # interact
+MouseLeft = "r2"       # fire
+MouseRight = "l2"      # aim
+MouseMiddle = "r3"
+WheelUp = "dpad_left"
+WheelDown = "dpad_right"
+Up = "dpad_up"         # phone
+Down = "dpad_down"
+Left = "dpad_left"
+Right = "dpad_right"
+M = "touchpad"         # map
+Escape = "options"
+Backspace = "create"
+Home = "ps"
+F2 = "profile:gta_fahren"
+
+[[profile]]
+name = "gta_fahren"
+normalize_diagonals = false
+
+[profile.mouse]
+target = "right_stick"
+sensitivity = 0.06
+curve = 1.3
+anti_deadzone = 0.12
+smoothing_ms = 15
+
+[profile.bind]
+W = "r2"               # throttle
+S = "l2"               # brake / reverse
+A = "left_stick_left"
+D = "left_stick_right"
+Up = "left_stick_up"   # lean / pitch
+Down = "left_stick_down"
+Space = "r1"           # handbrake
+F = "triangle"         # leave vehicle
+H = "l3"               # horn
+C = "r3"               # look back
+Q = "l1"               # radio
+MouseLeft = "r2"
+MouseRight = "l2"
+Left = "dpad_left"
+Right = "dpad_right"
+M = "touchpad"         # map
+Escape = "options"
+Backspace = "create"
+Home = "ps"
+F1 = "profile:gta"
