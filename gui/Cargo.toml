@@ -18,6 +18,10 @@ anyhow = "1"
 tast2controller-input = { path = "../crates/input" }
 log = "0.4"
 
+[build-dependencies]
+# Embeds the app icon into the EXE (MIT).
+winresource = "0.1"
+
 [profile.release]
 lto = false
 codegen-units = 16
