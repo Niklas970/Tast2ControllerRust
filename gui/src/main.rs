@@ -533,7 +533,7 @@ mod ui {
         }
         stop(s);
         s.updating = true;
-        s.message = format!("Lade {} und prüfe die SHA-256 …", rel.tag);
+        s.message = format!("Lade {} …", rel.tag);
         std::thread::spawn(move || {
             let res = update::install(&rel).and_then(|exe| update::restart(&exe));
             match res {
@@ -549,11 +549,10 @@ mod ui {
 
     fn update_banner(s: &State, t: Theme) -> Option<El> {
         let rel = s.update.as_ref()?;
-        let label = if s.updating { "Aktualisiere …" } else { "Jetzt aktualisieren" };
-        Some(card("update", t)
-            .child(text(format!("Neue Version {} verfügbar (installiert: {})", rel.tag, update::current_version())).font(type_::TITLE).color(t.text))
-            .child(text("Lädt die EXE von GitHub, prüft die SHA-256 und startet das Programm neu. Eine laufende Verbindung wird getrennt.").font(type_::LABEL).color(t.text_secondary))
-            .child(row().child(button(label, "update-install", t, true, install_update))))
+        let label = if s.updating { "Aktualisiere …" } else { "Aktualisieren" };
+        Some(row().key("update").gap(12.0).padding(12.0).radius(12.0).center_y().fill(t.card).border(1.0, t.card_border)
+            .child(text(format!("Version {} ist da", rel.tag)).font(type_::LABEL).color(t.text).grow(1.0))
+            .child(button(label, "update-install", t, true, install_update)))
     }
 
     fn action_label(b: &Binding) -> String {
@@ -687,18 +686,18 @@ mod ui {
         }
         let pairing = card("pairing", t)
             .child(text("PS5 koppeln").font(type_::TITLE).color(t.text))
-            .child(text("1. Bei Sony anmelden: dein Passwort gibt nur du im Browser bei Sony ein.").font(type_::LABEL).color(t.text_secondary))
+            .child(text("1. Bei Sony anmelden").font(type_::LABEL).color(t.text_secondary))
             .child(row().gap(10.0).center_y()
                 .child(button("Sony-Anmeldung öffnen", "open-login", t, false, open_login))
                 .child(field("redirect", &s.redirect, "Adresse der Seite „redirect“ hier einfügen", t, |s| &mut s.redirect))
                 .child(button("Account-ID holen", "get-account", t, false, fetch_account)))
             .child(text(if s.account.is_some() { "Account-ID: geholt" } else { "Account-ID: noch nicht geholt" }).font(type_::LABEL).color(t.text))
-            .child(text("2. PS5 auswählen. Sie wird im Netzwerk gesucht, die IP musst du nur eintragen, wenn sie nicht gefunden wird.").font(type_::LABEL).color(t.text_secondary))
+            .child(text("2. PS5 auswählen").font(type_::LABEL).color(t.text_secondary))
             .child(consoles)
             .child(row().gap(10.0).center_y()
                 .child(text("oder IP manuell:").font(type_::LABEL).color(t.text_secondary))
                 .child(field("host", &s.host, "z. B. 192.168.1.50", t, |s| &mut s.host)))
-            .child(text("3. PS5: Einstellungen › System › Remote-Wiedergabe › Gerät verknüpfen zeigt den Code.").font(type_::LABEL).color(t.text_secondary))
+            .child(text("3. Code aus PS5 › Remote-Wiedergabe › Gerät verknüpfen").font(type_::LABEL).color(t.text_secondary))
             .child(row().gap(10.0).center_y()
                 .child(field("pin", &s.pin, "8-stelliger Code", t, |s| &mut s.pin))
                 .child(button("Koppeln", "pair", t, true, pair)));
@@ -714,11 +713,10 @@ mod ui {
         let ui = &s.cfg.ui;
         card("program", t)
             .child(text("Programm").font(type_::TITLE).color(t.text))
-            .child(text("Minimieren legt das Fenster in den Infobereich (Tray); dort per Rechtsklick verbinden, trennen oder beenden.").font(type_::LABEL).color(t.text_secondary))
+            .child(text("Minimieren legt das Fenster in den Tray.").font(type_::LABEL).color(t.text_secondary))
             .child(row().gap(8.0).flex_wrap()
                 .child(chip("Im Tray starten", "ui-tray".into(), ui.start_in_tray, t, |s: &mut State| s.cfg.ui.start_in_tray = !s.cfg.ui.start_in_tray))
                 .child(chip("Beim Start verbinden", "ui-autoconnect".into(), ui.connect_on_launch, t, |s: &mut State| s.cfg.ui.connect_on_launch = !s.cfg.ui.connect_on_launch)))
-            .child(text("Gilt ab dem nächsten Programmstart.").font(type_::LABEL).color(t.text_secondary))
     }
 
     fn keys_tab(s: &State, t: Theme) -> El {
@@ -753,7 +751,7 @@ mod ui {
         });
         let mut presets = card("templates", t)
             .child(text("Vorlagen").font(type_::TITLE).color(t.text))
-            .child(text("Fügt fertige Profile hinzu, ein Profil mit gleichem Namen wird ersetzt.").font(type_::LABEL).color(t.text_secondary));
+            .child(text("Gleichnamige Profile werden ersetzt.").font(type_::LABEL).color(t.text_secondary));
         for (n, tp) in templates::TEMPLATES.iter().enumerate() {
             presets = presets.child(row().gap(10.0).center_y()
                 .child(button(tp.label, &format!("template-{n}"), t, false, move |s: &mut State| apply_template(s, n)))
@@ -799,8 +797,7 @@ mod ui {
             .child(stepper("Anti-Deadzone", "adz", m.anti_deadzone, |s| nudge(s, |m| m.anti_deadzone -= 0.01), |s| nudge(s, |m| m.anti_deadzone += 0.01)))
             .child(stepper("Beschleunigung", "accel", m.acceleration, |s| nudge(s, |m| m.acceleration -= 0.1), |s| nudge(s, |m| m.acceleration += 0.1)))
             .child(stepper("Glättung (ms)", "smooth", m.smoothing_ms, |s| nudge(s, |m| m.smoothing_ms -= 1.0), |s| nudge(s, |m| m.smoothing_ms += 1.0)))
-            .child(stepper("ADS-Faktor (L2)", "ads", m.ads_multiplier, |s| nudge(s, |m| m.ads_multiplier -= 0.05), |s| nudge(s, |m| m.ads_multiplier += 0.05)))
-            .child(text("Änderungen werden gespeichert und gelten ab der nächsten Verbindung.").font(type_::LABEL).color(t.text_secondary));
+            .child(stepper("ADS-Faktor (L2)", "ads", m.ads_multiplier, |s| nudge(s, |m| m.ads_multiplier -= 0.05), |s| nudge(s, |m| m.ads_multiplier += 0.05)));
         let mut chips = row().gap(8.0).flex_wrap();
         for (n, p) in s.cfg.profiles.iter().enumerate() {
             chips = chips.child(chip(&p.name, format!("mprofile-{n}"), n == i, t, move |s: &mut State| s.sel = n));
