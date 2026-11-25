@@ -42,6 +42,7 @@ mod ui {
         Connect,
         Keys,
         Mouse,
+        Settings,
     }
 
     /// What the settings window knows about the paired PS5's power.
@@ -71,6 +72,9 @@ mod ui {
         saved: String,
         /// Whether the pairing card is open (always when not paired yet).
         pairing_open: bool,
+        checking: bool,
+        /// The message on screen and since when; it disappears after a few seconds.
+        shown_message: (String, Option<std::time::Instant>),
         path: PathBuf,
         cfg: Config,
         runner: Option<Runner>,
@@ -122,6 +126,8 @@ mod ui {
             State {
                 saved: cfg.to_text().unwrap_or_default(),
                 pairing_open: false,
+                checking: false,
+                shown_message: (String::new(), None),
                 path,
                 cfg,
                 runner: None,
@@ -188,6 +194,17 @@ mod ui {
         if let Some(p) = s.cfg.profiles.get_mut(i) {
             f(&mut p.mouse.engine);
             p.mouse.engine = p.mouse.engine.clone().sanitized();
+        }
+    }
+
+    /// Hides a message 6 seconds after it appeared.
+    fn fade_message(s: &mut State) {
+        if s.message.is_empty() {
+            s.shown_message = (String::new(), None);
+        } else if s.shown_message.0 != s.message {
+            s.shown_message = (s.message.clone(), Some(std::time::Instant::now()));
+        } else if s.shown_message.1.is_some_and(|t| t.elapsed() > Duration::from_secs(6)) {
+            s.message.clear();
         }
     }
 
@@ -682,7 +699,7 @@ mod ui {
                 .child(row().gap(10.0).center_y()
                     .child(text(format!("Gekoppelt mit {label}")).font(type_::LABEL).color(t.text).grow(1.0))
                     .child(button("Neu koppeln", "pair-open", t, false, |s: &mut State| s.pairing_open = true)));
-            return col().gap(16.0).child(connection).child(power_card(s, t)).child(pairing).child(program_card(s, t));
+            return col().gap(16.0).child(connection).child(power_card(s, t)).child(pairing);
         }
         let pairing = card("pairing", t)
             .child(text("PS5 koppeln").font(type_::TITLE).color(t.text))
@@ -706,17 +723,50 @@ mod ui {
         } else {
             pairing
         };
-        col().gap(16.0).child(connection).child(power_card(s, t)).child(pairing).child(program_card(s, t))
+        col().gap(16.0).child(connection).child(power_card(s, t)).child(pairing)
     }
 
-    fn program_card(s: &State, t: Theme) -> El {
+    fn check_update(s: &mut State) {
+        if s.checking {
+            return;
+        }
+        s.checking = true;
+        std::thread::spawn(|| {
+            let res = update::check();
+            later(move |s| {
+                s.checking = false;
+                match res {
+                    Ok(Some(rel)) => s.update = Some(rel),
+                    Ok(None) => s.message = "Du hast die neueste Version.".into(),
+                    Err(e) => s.message = format!("Update-Prüfung fehlgeschlagen: {e:#}"),
+                }
+            });
+        });
+    }
+
+    fn settings_tab(s: &State, t: Theme) -> El {
         let ui = &s.cfg.ui;
-        card("program", t)
-            .child(text("Programm").font(type_::TITLE).color(t.text))
-            .child(text("Minimieren legt das Fenster in den Tray.").font(type_::LABEL).color(t.text_secondary))
+        let line = |label: &str, value: String| {
+            row().gap(10.0).center_y().h(30.0)
+                .child(text(label.to_string()).font(type_::LABEL).color(t.text_secondary).w(180.0))
+                .child(text(value).font(type_::LABEL).color(t.text).grow(1.0))
+        };
+        let start = card("settings-start", t)
+            .child(text("Start").font(type_::TITLE).color(t.text))
             .child(row().gap(8.0).flex_wrap()
                 .child(chip("Im Tray starten", "ui-tray".into(), ui.start_in_tray, t, |s: &mut State| s.cfg.ui.start_in_tray = !s.cfg.ui.start_in_tray))
-                .child(chip("Beim Start verbinden", "ui-autoconnect".into(), ui.connect_on_launch, t, |s: &mut State| s.cfg.ui.connect_on_launch = !s.cfg.ui.connect_on_launch)))
+                .child(chip("Beim Start verbinden", "ui-autoconnect".into(), ui.connect_on_launch, t, |s: &mut State| s.cfg.ui.connect_on_launch = !s.cfg.ui.connect_on_launch))
+                .child(chip("Steuerung sofort übernehmen", "ui-capture".into(), s.cfg.input.capture_on_start, t, |s: &mut State| s.cfg.input.capture_on_start = !s.cfg.input.capture_on_start)));
+        let keys = card("settings-keys", t)
+            .child(text("Tasten").font(type_::TITLE).color(t.text))
+            .child(line("Freigeben / übernehmen", s.cfg.input.capture_toggle.clone()))
+            .child(line("Trennen", s.cfg.input.quit.clone()));
+        let about = card("settings-about", t)
+            .child(text("Programm").font(type_::TITLE).color(t.text))
+            .child(line("Version", update::current_version().to_string()))
+            .child(line("Config", s.path.display().to_string()))
+            .child(row().child(button(if s.checking { "Prüfe …" } else { "Nach Updates suchen" }, "update-check", t, false, check_update)));
+        col().gap(16.0).child(start).child(keys).child(about)
     }
 
     fn keys_tab(s: &State, t: Theme) -> El {
@@ -810,11 +860,13 @@ mod ui {
         let tabs = row().gap(8.0)
             .child(chip("Verbindung", "tab-connect".into(), s.tab == Tab::Connect, t, |s: &mut State| s.tab = Tab::Connect))
             .child(chip("Profile & Tasten", "tab-keys".into(), s.tab == Tab::Keys, t, |s: &mut State| s.tab = Tab::Keys))
-            .child(chip("Maus", "tab-mouse".into(), s.tab == Tab::Mouse, t, |s: &mut State| s.tab = Tab::Mouse));
+            .child(chip("Maus", "tab-mouse".into(), s.tab == Tab::Mouse, t, |s: &mut State| s.tab = Tab::Mouse))
+            .child(chip("Einstellungen", "tab-settings".into(), s.tab == Tab::Settings, t, |s: &mut State| s.tab = Tab::Settings));
         let body = match s.tab {
             Tab::Connect => connect_tab(s, t),
             Tab::Keys => keys_tab(s, t),
             Tab::Mouse => mouse_tab(s, t),
+            Tab::Settings => settings_tab(s, t),
         };
         let (pill, pill_on) = match (&s.runner, s.capturing) {
             (Some(_), true) => ("Steuert die PS5", true),
@@ -879,6 +931,7 @@ mod ui {
                             }
                         }
                         autosave(s);
+                        fade_message(s);
                         if let Some(tray) = &s.tray {
                             tray.set_status(&format!("Tast2ControllerRust: {}", s.status), s.runner.is_some());
                         }
