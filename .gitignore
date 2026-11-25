@@ -5,3 +5,4 @@ config.toml
 
 # local tool state, not part of the project
 /.claude/
+/CLAUDE.md
