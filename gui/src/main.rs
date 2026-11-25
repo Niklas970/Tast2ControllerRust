@@ -67,6 +67,10 @@ mod ui {
     }
 
     struct State {
+        /// The config as last loaded or saved; the window saves by itself when `cfg` differs.
+        saved: String,
+        /// Whether the pairing card is open (always when not paired yet).
+        pairing_open: bool,
         path: PathBuf,
         cfg: Config,
         runner: Option<Runner>,
@@ -116,6 +120,8 @@ mod ui {
             };
             let host = TextEdit::new(cfg.console.host.clone());
             State {
+                saved: cfg.to_text().unwrap_or_default(),
+                pairing_open: false,
                 path,
                 cfg,
                 runner: None,
@@ -185,10 +191,18 @@ mod ui {
         }
     }
 
-    fn save(s: &mut State) {
+    /// Saves the config when it changed since the last save (called twice a second).
+    fn autosave(s: &mut State) {
+        let Ok(text) = s.cfg.to_text() else { return };
+        if text == s.saved {
+            return;
+        }
         match s.cfg.save(&s.path) {
-            Ok(()) => s.message = format!("Gespeichert: {}", s.path.display()),
-            Err(e) => s.message = format!("Speichern fehlgeschlagen: {e:#}"),
+            Ok(()) => s.saved = text,
+            Err(e) => {
+                s.saved = text; // don't retry every half second; the next change tries again
+                s.message = format!("Speichern fehlgeschlagen: {e:#}");
+            }
         }
     }
 
@@ -377,6 +391,8 @@ mod ui {
                     Ok(cfg) => {
                         s.cfg = cfg;
                         s.pin = TextEdit::new("");
+                        s.saved = s.cfg.to_text().unwrap_or_default();
+                        s.pairing_open = false;
                         s.message = "Gekoppelt. Du kannst jetzt verbinden.".into();
                         check_power(s);
                     }
@@ -567,7 +583,7 @@ mod ui {
             Ok(_) => {
                 s.bind_input = TextEdit::new("");
                 s.bind_action = TextEdit::new("");
-                s.message = "Belegung hinzugefügt; mit „Config speichern“ übernehmen.".into();
+                s.message = "Belegung hinzugefügt, gilt ab der nächsten Verbindung.".into();
             }
             Err(e) => {
                 if let Some(p) = s.cfg.profiles.get_mut(i) {
@@ -592,9 +608,9 @@ mod ui {
                     s.sel = i;
                 }
                 s.message = if replaced.is_empty() {
-                    format!("Vorlage „{}“ hinzugefügt; mit „Config speichern“ übernehmen.", tp.label)
+                    format!("Vorlage „{}“ hinzugefügt.", tp.label)
                 } else {
-                    format!("Vorlage „{}“ übernommen, ersetzt: {}. Mit „Config speichern“ übernehmen.", tp.label, replaced.join(", "))
+                    format!("Vorlage „{}“ übernommen, ersetzt: {}.", tp.label, replaced.join(", "))
                 };
             }
             Err(e) => {
@@ -620,14 +636,14 @@ mod ui {
             s.cfg.input.start_profile = None;
         }
         s.sel = i.saturating_sub(1);
-        s.message = format!("Profil „{}“ gelöscht; mit „Config speichern“ übernehmen.", removed.name);
+        s.message = format!("Profil „{}“ gelöscht.", removed.name);
     }
 
     fn connect_tab(s: &State, t: Theme) -> El {
         let running = s.runner.is_some();
         let connection = card("connection", t)
             .child(text("Verbindung").font(type_::TITLE).color(t.text))
-            .child(text(s.status.clone()).font(type_::LABEL).color(t.text_secondary));
+            .child(text(if running { s.status.clone() } else { "Nicht verbunden".into() }).font(type_::LABEL).color(t.text_secondary));
         let connection = if running {
             let (line, color) = if s.capturing {
                 (format!("Maus und Tastatur steuern die PS5. {} gibt sie frei, {} trennt.",
@@ -647,9 +663,12 @@ mod ui {
         } else {
             buttons.child(button("Verbinden", "start", t, true, start))
         };
-        let connection = connection.child(buttons.child(button("Config speichern", "save", t, false, save)));
-
         let paired = s.cfg.credentials().is_ok();
+        let connection = if paired {
+            connection.child(buttons)
+        } else {
+            connection.child(text("Zuerst die PS5 koppeln (unten).").font(type_::LABEL).color(t.text_secondary))
+        };
         let mut consoles = row().gap(8.0).flex_wrap().center_y();
         for c in &s.found {
             let ip = c.ip.to_string();
@@ -658,8 +677,16 @@ mod ui {
                 move |s: &mut State| s.host = TextEdit::new(ip.clone())));
         }
         consoles = consoles.child(button(if s.searching { "Suche läuft …" } else { "PS5 suchen" }, "search", t, s.found.is_empty(), search));
+        if paired && !s.pairing_open {
+            let label = if s.cfg.console.nickname.is_empty() { "PS5".to_string() } else { s.cfg.console.nickname.clone() };
+            let pairing = card("pairing", t)
+                .child(row().gap(10.0).center_y()
+                    .child(text(format!("Gekoppelt mit {label}")).font(type_::LABEL).color(t.text).grow(1.0))
+                    .child(button("Neu koppeln", "pair-open", t, false, |s: &mut State| s.pairing_open = true)));
+            return col().gap(16.0).child(connection).child(power_card(s, t)).child(pairing).child(program_card(s, t));
+        }
         let pairing = card("pairing", t)
-            .child(text(if paired { "PS5 koppeln (bereits gekoppelt)" } else { "PS5 koppeln" }).font(type_::TITLE).color(t.text))
+            .child(text("PS5 koppeln").font(type_::TITLE).color(t.text))
             .child(text("1. Bei Sony anmelden: dein Passwort gibt nur du im Browser bei Sony ein.").font(type_::LABEL).color(t.text_secondary))
             .child(row().gap(10.0).center_y()
                 .child(button("Sony-Anmeldung öffnen", "open-login", t, false, open_login))
@@ -675,15 +702,23 @@ mod ui {
             .child(row().gap(10.0).center_y()
                 .child(field("pin", &s.pin, "8-stelliger Code", t, |s| &mut s.pin))
                 .child(button("Koppeln", "pair", t, true, pair)));
+        let pairing = if paired {
+            pairing.child(row().child(button("Schließen", "pair-close", t, false, |s: &mut State| s.pairing_open = false)))
+        } else {
+            pairing
+        };
+        col().gap(16.0).child(connection).child(power_card(s, t)).child(pairing).child(program_card(s, t))
+    }
+
+    fn program_card(s: &State, t: Theme) -> El {
         let ui = &s.cfg.ui;
-        let program = card("program", t)
+        card("program", t)
             .child(text("Programm").font(type_::TITLE).color(t.text))
             .child(text("Minimieren legt das Fenster in den Infobereich (Tray); dort per Rechtsklick verbinden, trennen oder beenden.").font(type_::LABEL).color(t.text_secondary))
             .child(row().gap(8.0).flex_wrap()
                 .child(chip("Im Tray starten", "ui-tray".into(), ui.start_in_tray, t, |s: &mut State| s.cfg.ui.start_in_tray = !s.cfg.ui.start_in_tray))
                 .child(chip("Beim Start verbinden", "ui-autoconnect".into(), ui.connect_on_launch, t, |s: &mut State| s.cfg.ui.connect_on_launch = !s.cfg.ui.connect_on_launch)))
-            .child(text("Wirkt nach „Config speichern“ beim nächsten Programmstart.").font(type_::LABEL).color(t.text_secondary));
-        col().gap(16.0).child(power_card(s, t)).child(connection).child(pairing).child(program)
+            .child(text("Gilt ab dem nächsten Programmstart.").font(type_::LABEL).color(t.text_secondary))
     }
 
     fn keys_tab(s: &State, t: Theme) -> El {
@@ -718,7 +753,7 @@ mod ui {
         });
         let mut presets = card("templates", t)
             .child(text("Vorlagen").font(type_::TITLE).color(t.text))
-            .child(text("Fügt fertige Profile hinzu; ein Profil mit gleichem Namen wird ersetzt. Wirkt nach „Config speichern“.").font(type_::LABEL).color(t.text_secondary));
+            .child(text("Fügt fertige Profile hinzu, ein Profil mit gleichem Namen wird ersetzt.").font(type_::LABEL).color(t.text_secondary));
         for (n, tp) in templates::TEMPLATES.iter().enumerate() {
             presets = presets.child(row().gap(10.0).center_y()
                 .child(button(tp.label, &format!("template-{n}"), t, false, move |s: &mut State| apply_template(s, n)))
@@ -765,7 +800,7 @@ mod ui {
             .child(stepper("Beschleunigung", "accel", m.acceleration, |s| nudge(s, |m| m.acceleration -= 0.1), |s| nudge(s, |m| m.acceleration += 0.1)))
             .child(stepper("Glättung (ms)", "smooth", m.smoothing_ms, |s| nudge(s, |m| m.smoothing_ms -= 1.0), |s| nudge(s, |m| m.smoothing_ms += 1.0)))
             .child(stepper("ADS-Faktor (L2)", "ads", m.ads_multiplier, |s| nudge(s, |m| m.ads_multiplier -= 0.05), |s| nudge(s, |m| m.ads_multiplier += 0.05)))
-            .child(text("Änderungen wirken nach „Config speichern“ und neuem Verbinden.").font(type_::LABEL).color(t.text_secondary));
+            .child(text("Änderungen werden gespeichert und gelten ab der nächsten Verbindung.").font(type_::LABEL).color(t.text_secondary));
         let mut chips = row().gap(8.0).flex_wrap();
         for (n, p) in s.cfg.profiles.iter().enumerate() {
             chips = chips.child(chip(&p.name, format!("mprofile-{n}"), n == i, t, move |s: &mut State| s.sel = n));
@@ -784,8 +819,20 @@ mod ui {
             Tab::Keys => keys_tab(s, t),
             Tab::Mouse => mouse_tab(s, t),
         };
-        let mut page = col().w_full().h_full().padding(28.0).gap(14.0).fill(t.bg)
+        let (pill, pill_on) = match (&s.runner, s.capturing) {
+            (Some(_), true) => ("Steuert die PS5", true),
+            (Some(r), false) if r.is_streaming() => ("Verbunden", true),
+            (Some(_), false) => ("Verbindet …", false),
+            (None, _) => ("Nicht verbunden", false),
+        };
+        let header = row().gap(12.0).center_y()
             .child(text("Tast2ControllerRust").font(type_::TITLE).color(t.text))
+            .child(text(format!("v{}", update::current_version())).font(type_::LABEL).color(t.text_secondary).grow(1.0))
+            .child(row().key("status-pill").h(28.0).px(12.0).radius(14.0).center_y()
+                .fill(if pill_on { accent() } else { t.card }).border(1.0, t.card_border)
+                .child(text(pill).font(type_::LABEL).color(if pill_on { Color::WHITE } else { t.text_secondary })));
+        let mut page = col().w_full().h_full().padding(28.0).gap(14.0).fill(t.bg)
+            .child(header)
             .child(tabs);
         if let Some(banner) = update_banner(s, t) {
             page = page.child(banner);
@@ -793,7 +840,9 @@ mod ui {
         page = page
             .child(col().key(format!("body-{}", s.tab as u8)).child(body).scroll(rune::ScrollSpec { stick_bottom: false }).shrink().min_h(0.0).grow(1.0));
         if !s.message.is_empty() {
-            page = page.child(text(s.message.clone()).font(type_::LABEL).color(t.text_secondary));
+            page = page.child(row().key("message").gap(10.0).padding(10.0).radius(10.0).center_y().fill(t.card).border(1.0, t.card_border)
+                .child(text(s.message.clone()).font(type_::LABEL).color(t.text).grow(1.0))
+                .child(button("✕", "message-close", t, false, |s: &mut State| s.message.clear())));
         }
         page
     }
@@ -832,6 +881,7 @@ mod ui {
                                 s.capturing = false;
                             }
                         }
+                        autosave(s);
                         if let Some(tray) = &s.tray {
                             tray.set_status(&format!("Tast2ControllerRust: {}", s.status), s.runner.is_some());
                         }
