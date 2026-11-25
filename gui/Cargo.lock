@@ -3792,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "tast2controller"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -3806,12 +3806,12 @@ dependencies = [
  "tast2controller-input",
  "toml 0.8.23",
  "ureq",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "tast2controller-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3823,12 +3823,12 @@ dependencies = [
  "log",
  "rand",
  "sha2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "tast2controller-gui"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "log",
@@ -3840,7 +3840,7 @@ dependencies = [
 
 [[package]]
 name = "tast2controller-input"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
 ]
