@@ -799,6 +799,10 @@ mod ui {
     }
 
     pub fn run() {
+        // title bar, taskbar and Alt+Tab icon (must be set before the window opens)
+        if let Err(e) = rune::set_app_icon(include_bytes!("../../assets/icon/tast2controller-256.png").as_slice()) {
+            log::warn!("window icon: {e}");
+        }
         let mut spec = AppSpec::new("Tast2ControllerRust", (760.0, 720.0), State::default, view);
         spec.min_size = Some((600.0, 520.0));
         let app = App::new(spec);
