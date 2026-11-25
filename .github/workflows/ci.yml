@@ -35,7 +35,7 @@ jobs:
       - name: Build the settings window
         working-directory: gui
         run: cargo build --release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tast2controller-windows
           path: gui/target/release/tast2controller.exe
