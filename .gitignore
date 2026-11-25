@@ -2,3 +2,6 @@
 *.log
 config.toml
 /gui/target
+
+# local tool state, not part of the project
+/.claude/
