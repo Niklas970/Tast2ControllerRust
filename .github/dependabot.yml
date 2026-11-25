@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # main workspace: core, input, app
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-patch:
+        update-types: ["patch"]
+  # settings window (own workspace, own Rust version)
+  - package-ecosystem: cargo
+    directory: /gui
+    schedule:
+      interval: weekly
+    ignore:
+      # Rune is pre-release and pinned to a tested git revision on purpose;
+      # move it by hand together with gui/rust-toolchain.toml.
+      - dependency-name: rune
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
