@@ -8,7 +8,7 @@ license.workspace = true
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-toml = "0.8"
+toml = "1.2"
 
 [lints]
 workspace = true
