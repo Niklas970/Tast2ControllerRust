@@ -42,6 +42,7 @@ mod ui {
         Connect,
         Keys,
         Mouse,
+        Settings,
     }
 
     /// What the settings window knows about the paired PS5's power.
@@ -67,6 +68,13 @@ mod ui {
     }
 
     struct State {
+        /// The config as last loaded or saved; the window saves by itself when `cfg` differs.
+        saved: String,
+        /// Whether the pairing card is open (always when not paired yet).
+        pairing_open: bool,
+        checking: bool,
+        /// The message on screen and since when; it disappears after a few seconds.
+        shown_message: (String, Option<std::time::Instant>),
         path: PathBuf,
         cfg: Config,
         runner: Option<Runner>,
@@ -116,6 +124,10 @@ mod ui {
             };
             let host = TextEdit::new(cfg.console.host.clone());
             State {
+                saved: cfg.to_text().unwrap_or_default(),
+                pairing_open: false,
+                checking: false,
+                shown_message: (String::new(), None),
                 path,
                 cfg,
                 runner: None,
@@ -185,10 +197,29 @@ mod ui {
         }
     }
 
-    fn save(s: &mut State) {
+    /// Hides a message 6 seconds after it appeared.
+    fn fade_message(s: &mut State) {
+        if s.message.is_empty() {
+            s.shown_message = (String::new(), None);
+        } else if s.shown_message.0 != s.message {
+            s.shown_message = (s.message.clone(), Some(std::time::Instant::now()));
+        } else if s.shown_message.1.is_some_and(|t| t.elapsed() > Duration::from_secs(6)) {
+            s.message.clear();
+        }
+    }
+
+    /// Saves the config when it changed since the last save (called twice a second).
+    fn autosave(s: &mut State) {
+        let Ok(text) = s.cfg.to_text() else { return };
+        if text == s.saved {
+            return;
+        }
         match s.cfg.save(&s.path) {
-            Ok(()) => s.message = format!("Gespeichert: {}", s.path.display()),
-            Err(e) => s.message = format!("Speichern fehlgeschlagen: {e:#}"),
+            Ok(()) => s.saved = text,
+            Err(e) => {
+                s.saved = text; // don't retry every half second; the next change tries again
+                s.message = format!("Speichern fehlgeschlagen: {e:#}");
+            }
         }
     }
 
@@ -377,6 +408,8 @@ mod ui {
                     Ok(cfg) => {
                         s.cfg = cfg;
                         s.pin = TextEdit::new("");
+                        s.saved = s.cfg.to_text().unwrap_or_default();
+                        s.pairing_open = false;
                         s.message = "Gekoppelt. Du kannst jetzt verbinden.".into();
                         check_power(s);
                     }
@@ -517,7 +550,7 @@ mod ui {
         }
         stop(s);
         s.updating = true;
-        s.message = format!("Lade {} und prüfe die SHA-256 …", rel.tag);
+        s.message = format!("Lade {} …", rel.tag);
         std::thread::spawn(move || {
             let res = update::install(&rel).and_then(|exe| update::restart(&exe));
             match res {
@@ -533,11 +566,10 @@ mod ui {
 
     fn update_banner(s: &State, t: Theme) -> Option<El> {
         let rel = s.update.as_ref()?;
-        let label = if s.updating { "Aktualisiere …" } else { "Jetzt aktualisieren" };
-        Some(card("update", t)
-            .child(text(format!("Neue Version {} verfügbar (installiert: {})", rel.tag, update::current_version())).font(type_::TITLE).color(t.text))
-            .child(text("Lädt die EXE von GitHub, prüft die SHA-256 und startet das Programm neu. Eine laufende Verbindung wird getrennt.").font(type_::LABEL).color(t.text_secondary))
-            .child(row().child(button(label, "update-install", t, true, install_update))))
+        let label = if s.updating { "Aktualisiere …" } else { "Aktualisieren" };
+        Some(row().key("update").gap(12.0).padding(12.0).radius(12.0).center_y().fill(t.card).border(1.0, t.card_border)
+            .child(text(format!("Version {} ist da", rel.tag)).font(type_::LABEL).color(t.text).grow(1.0))
+            .child(button(label, "update-install", t, true, install_update)))
     }
 
     fn action_label(b: &Binding) -> String {
@@ -567,7 +599,7 @@ mod ui {
             Ok(_) => {
                 s.bind_input = TextEdit::new("");
                 s.bind_action = TextEdit::new("");
-                s.message = "Belegung hinzugefügt; mit „Config speichern“ übernehmen.".into();
+                s.message = "Belegung hinzugefügt, gilt ab der nächsten Verbindung.".into();
             }
             Err(e) => {
                 if let Some(p) = s.cfg.profiles.get_mut(i) {
@@ -592,9 +624,9 @@ mod ui {
                     s.sel = i;
                 }
                 s.message = if replaced.is_empty() {
-                    format!("Vorlage „{}“ hinzugefügt; mit „Config speichern“ übernehmen.", tp.label)
+                    format!("Vorlage „{}“ hinzugefügt.", tp.label)
                 } else {
-                    format!("Vorlage „{}“ übernommen, ersetzt: {}. Mit „Config speichern“ übernehmen.", tp.label, replaced.join(", "))
+                    format!("Vorlage „{}“ übernommen, ersetzt: {}.", tp.label, replaced.join(", "))
                 };
             }
             Err(e) => {
@@ -620,14 +652,14 @@ mod ui {
             s.cfg.input.start_profile = None;
         }
         s.sel = i.saturating_sub(1);
-        s.message = format!("Profil „{}“ gelöscht; mit „Config speichern“ übernehmen.", removed.name);
+        s.message = format!("Profil „{}“ gelöscht.", removed.name);
     }
 
     fn connect_tab(s: &State, t: Theme) -> El {
         let running = s.runner.is_some();
         let connection = card("connection", t)
             .child(text("Verbindung").font(type_::TITLE).color(t.text))
-            .child(text(s.status.clone()).font(type_::LABEL).color(t.text_secondary));
+            .child(text(if running { s.status.clone() } else { "Nicht verbunden".into() }).font(type_::LABEL).color(t.text_secondary));
         let connection = if running {
             let (line, color) = if s.capturing {
                 (format!("Maus und Tastatur steuern die PS5. {} gibt sie frei, {} trennt.",
@@ -647,9 +679,12 @@ mod ui {
         } else {
             buttons.child(button("Verbinden", "start", t, true, start))
         };
-        let connection = connection.child(buttons.child(button("Config speichern", "save", t, false, save)));
-
         let paired = s.cfg.credentials().is_ok();
+        let connection = if paired {
+            connection.child(buttons)
+        } else {
+            connection.child(text("Zuerst die PS5 koppeln (unten).").font(type_::LABEL).color(t.text_secondary))
+        };
         let mut consoles = row().gap(8.0).flex_wrap().center_y();
         for c in &s.found {
             let ip = c.ip.to_string();
@@ -658,32 +693,80 @@ mod ui {
                 move |s: &mut State| s.host = TextEdit::new(ip.clone())));
         }
         consoles = consoles.child(button(if s.searching { "Suche läuft …" } else { "PS5 suchen" }, "search", t, s.found.is_empty(), search));
+        if paired && !s.pairing_open {
+            let label = if s.cfg.console.nickname.is_empty() { "PS5".to_string() } else { s.cfg.console.nickname.clone() };
+            let pairing = card("pairing", t)
+                .child(row().gap(10.0).center_y()
+                    .child(text(format!("Gekoppelt mit {label}")).font(type_::LABEL).color(t.text).grow(1.0))
+                    .child(button("Neu koppeln", "pair-open", t, false, |s: &mut State| s.pairing_open = true)));
+            return col().gap(16.0).child(connection).child(power_card(s, t)).child(pairing);
+        }
         let pairing = card("pairing", t)
-            .child(text(if paired { "PS5 koppeln (bereits gekoppelt)" } else { "PS5 koppeln" }).font(type_::TITLE).color(t.text))
-            .child(text("1. Bei Sony anmelden: dein Passwort gibt nur du im Browser bei Sony ein.").font(type_::LABEL).color(t.text_secondary))
+            .child(text("PS5 koppeln").font(type_::TITLE).color(t.text))
+            .child(text("1. Bei Sony anmelden").font(type_::LABEL).color(t.text_secondary))
             .child(row().gap(10.0).center_y()
                 .child(button("Sony-Anmeldung öffnen", "open-login", t, false, open_login))
                 .child(field("redirect", &s.redirect, "Adresse der Seite „redirect“ hier einfügen", t, |s| &mut s.redirect))
                 .child(button("Account-ID holen", "get-account", t, false, fetch_account)))
             .child(text(if s.account.is_some() { "Account-ID: geholt" } else { "Account-ID: noch nicht geholt" }).font(type_::LABEL).color(t.text))
-            .child(text("2. PS5 auswählen. Sie wird im Netzwerk gesucht, die IP musst du nur eintragen, wenn sie nicht gefunden wird.").font(type_::LABEL).color(t.text_secondary))
+            .child(text("2. PS5 auswählen").font(type_::LABEL).color(t.text_secondary))
             .child(consoles)
             .child(row().gap(10.0).center_y()
                 .child(text("oder IP manuell:").font(type_::LABEL).color(t.text_secondary))
                 .child(field("host", &s.host, "z. B. 192.168.1.50", t, |s| &mut s.host)))
-            .child(text("3. PS5: Einstellungen › System › Remote-Wiedergabe › Gerät verknüpfen zeigt den Code.").font(type_::LABEL).color(t.text_secondary))
+            .child(text("3. Code aus PS5 › Remote-Wiedergabe › Gerät verknüpfen").font(type_::LABEL).color(t.text_secondary))
             .child(row().gap(10.0).center_y()
                 .child(field("pin", &s.pin, "8-stelliger Code", t, |s| &mut s.pin))
                 .child(button("Koppeln", "pair", t, true, pair)));
+        let pairing = if paired {
+            pairing.child(row().child(button("Schließen", "pair-close", t, false, |s: &mut State| s.pairing_open = false)))
+        } else {
+            pairing
+        };
+        col().gap(16.0).child(connection).child(power_card(s, t)).child(pairing)
+    }
+
+    fn check_update(s: &mut State) {
+        if s.checking {
+            return;
+        }
+        s.checking = true;
+        std::thread::spawn(|| {
+            let res = update::check();
+            later(move |s| {
+                s.checking = false;
+                match res {
+                    Ok(Some(rel)) => s.update = Some(rel),
+                    Ok(None) => s.message = "Du hast die neueste Version.".into(),
+                    Err(e) => s.message = format!("Update-Prüfung fehlgeschlagen: {e:#}"),
+                }
+            });
+        });
+    }
+
+    fn settings_tab(s: &State, t: Theme) -> El {
         let ui = &s.cfg.ui;
-        let program = card("program", t)
-            .child(text("Programm").font(type_::TITLE).color(t.text))
-            .child(text("Minimieren legt das Fenster in den Infobereich (Tray); dort per Rechtsklick verbinden, trennen oder beenden.").font(type_::LABEL).color(t.text_secondary))
+        let line = |label: &str, value: String| {
+            row().gap(10.0).center_y().h(30.0)
+                .child(text(label.to_string()).font(type_::LABEL).color(t.text_secondary).w(180.0))
+                .child(text(value).font(type_::LABEL).color(t.text).grow(1.0))
+        };
+        let start = card("settings-start", t)
+            .child(text("Start").font(type_::TITLE).color(t.text))
             .child(row().gap(8.0).flex_wrap()
                 .child(chip("Im Tray starten", "ui-tray".into(), ui.start_in_tray, t, |s: &mut State| s.cfg.ui.start_in_tray = !s.cfg.ui.start_in_tray))
-                .child(chip("Beim Start verbinden", "ui-autoconnect".into(), ui.connect_on_launch, t, |s: &mut State| s.cfg.ui.connect_on_launch = !s.cfg.ui.connect_on_launch)))
-            .child(text("Wirkt nach „Config speichern“ beim nächsten Programmstart.").font(type_::LABEL).color(t.text_secondary));
-        col().gap(16.0).child(power_card(s, t)).child(connection).child(pairing).child(program)
+                .child(chip("Beim Start verbinden", "ui-autoconnect".into(), ui.connect_on_launch, t, |s: &mut State| s.cfg.ui.connect_on_launch = !s.cfg.ui.connect_on_launch))
+                .child(chip("Steuerung sofort übernehmen", "ui-capture".into(), s.cfg.input.capture_on_start, t, |s: &mut State| s.cfg.input.capture_on_start = !s.cfg.input.capture_on_start)));
+        let keys = card("settings-keys", t)
+            .child(text("Tasten").font(type_::TITLE).color(t.text))
+            .child(line("Freigeben / übernehmen", s.cfg.input.capture_toggle.clone()))
+            .child(line("Trennen", s.cfg.input.quit.clone()));
+        let about = card("settings-about", t)
+            .child(text("Programm").font(type_::TITLE).color(t.text))
+            .child(line("Version", update::current_version().to_string()))
+            .child(line("Config", s.path.display().to_string()))
+            .child(row().child(button(if s.checking { "Prüfe …" } else { "Nach Updates suchen" }, "update-check", t, false, check_update)));
+        col().gap(16.0).child(start).child(keys).child(about)
     }
 
     fn keys_tab(s: &State, t: Theme) -> El {
@@ -718,7 +801,7 @@ mod ui {
         });
         let mut presets = card("templates", t)
             .child(text("Vorlagen").font(type_::TITLE).color(t.text))
-            .child(text("Fügt fertige Profile hinzu; ein Profil mit gleichem Namen wird ersetzt. Wirkt nach „Config speichern“.").font(type_::LABEL).color(t.text_secondary));
+            .child(text("Gleichnamige Profile werden ersetzt.").font(type_::LABEL).color(t.text_secondary));
         for (n, tp) in templates::TEMPLATES.iter().enumerate() {
             presets = presets.child(row().gap(10.0).center_y()
                 .child(button(tp.label, &format!("template-{n}"), t, false, move |s: &mut State| apply_template(s, n)))
@@ -764,8 +847,7 @@ mod ui {
             .child(stepper("Anti-Deadzone", "adz", m.anti_deadzone, |s| nudge(s, |m| m.anti_deadzone -= 0.01), |s| nudge(s, |m| m.anti_deadzone += 0.01)))
             .child(stepper("Beschleunigung", "accel", m.acceleration, |s| nudge(s, |m| m.acceleration -= 0.1), |s| nudge(s, |m| m.acceleration += 0.1)))
             .child(stepper("Glättung (ms)", "smooth", m.smoothing_ms, |s| nudge(s, |m| m.smoothing_ms -= 1.0), |s| nudge(s, |m| m.smoothing_ms += 1.0)))
-            .child(stepper("ADS-Faktor (L2)", "ads", m.ads_multiplier, |s| nudge(s, |m| m.ads_multiplier -= 0.05), |s| nudge(s, |m| m.ads_multiplier += 0.05)))
-            .child(text("Änderungen wirken nach „Config speichern“ und neuem Verbinden.").font(type_::LABEL).color(t.text_secondary));
+            .child(stepper("ADS-Faktor (L2)", "ads", m.ads_multiplier, |s| nudge(s, |m| m.ads_multiplier -= 0.05), |s| nudge(s, |m| m.ads_multiplier += 0.05)));
         let mut chips = row().gap(8.0).flex_wrap();
         for (n, p) in s.cfg.profiles.iter().enumerate() {
             chips = chips.child(chip(&p.name, format!("mprofile-{n}"), n == i, t, move |s: &mut State| s.sel = n));
@@ -778,14 +860,28 @@ mod ui {
         let tabs = row().gap(8.0)
             .child(chip("Verbindung", "tab-connect".into(), s.tab == Tab::Connect, t, |s: &mut State| s.tab = Tab::Connect))
             .child(chip("Profile & Tasten", "tab-keys".into(), s.tab == Tab::Keys, t, |s: &mut State| s.tab = Tab::Keys))
-            .child(chip("Maus", "tab-mouse".into(), s.tab == Tab::Mouse, t, |s: &mut State| s.tab = Tab::Mouse));
+            .child(chip("Maus", "tab-mouse".into(), s.tab == Tab::Mouse, t, |s: &mut State| s.tab = Tab::Mouse))
+            .child(chip("Einstellungen", "tab-settings".into(), s.tab == Tab::Settings, t, |s: &mut State| s.tab = Tab::Settings));
         let body = match s.tab {
             Tab::Connect => connect_tab(s, t),
             Tab::Keys => keys_tab(s, t),
             Tab::Mouse => mouse_tab(s, t),
+            Tab::Settings => settings_tab(s, t),
         };
-        let mut page = col().w_full().h_full().padding(28.0).gap(14.0).fill(t.bg)
+        let (pill, pill_on) = match (&s.runner, s.capturing) {
+            (Some(_), true) => ("Steuert die PS5", true),
+            (Some(r), false) if r.is_streaming() => ("Verbunden", true),
+            (Some(_), false) => ("Verbindet …", false),
+            (None, _) => ("Nicht verbunden", false),
+        };
+        let header = row().gap(12.0).center_y()
             .child(text("Tast2ControllerRust").font(type_::TITLE).color(t.text))
+            .child(text(format!("v{}", update::current_version())).font(type_::LABEL).color(t.text_secondary).grow(1.0))
+            .child(row().key("status-pill").h(28.0).px(12.0).radius(14.0).center_y()
+                .fill(if pill_on { accent() } else { t.card }).border(1.0, t.card_border)
+                .child(text(pill).font(type_::LABEL).color(if pill_on { Color::WHITE } else { t.text_secondary })));
+        let mut page = col().w_full().h_full().padding(28.0).gap(14.0).fill(t.bg)
+            .child(header)
             .child(tabs);
         if let Some(banner) = update_banner(s, t) {
             page = page.child(banner);
@@ -793,7 +889,9 @@ mod ui {
         page = page
             .child(col().key(format!("body-{}", s.tab as u8)).child(body).scroll(rune::ScrollSpec { stick_bottom: false }).shrink().min_h(0.0).grow(1.0));
         if !s.message.is_empty() {
-            page = page.child(text(s.message.clone()).font(type_::LABEL).color(t.text_secondary));
+            page = page.child(row().key("message").gap(10.0).padding(10.0).radius(10.0).center_y().fill(t.card).border(1.0, t.card_border)
+                .child(text(s.message.clone()).font(type_::LABEL).color(t.text).grow(1.0))
+                .child(button("✕", "message-close", t, false, |s: &mut State| s.message.clear())));
         }
         page
     }
@@ -832,6 +930,8 @@ mod ui {
                                 s.capturing = false;
                             }
                         }
+                        autosave(s);
+                        fade_message(s);
                         if let Some(tray) = &s.tray {
                             tray.set_status(&format!("Tast2ControllerRust: {}", s.status), s.runner.is_some());
                         }

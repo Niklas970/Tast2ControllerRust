@@ -185,11 +185,19 @@ pub fn replace_file(target: &Path, new_exe: &[u8]) -> Result<()> {
     let staged = with_suffix(target, ".new");
     let old = with_suffix(target, ".old");
     std::fs::write(&staged, new_exe).with_context(|| format!("writing {}", staged.display()))?;
-    if old.exists() {
-        // left over from an earlier update; if it is still in use, give up cleanly
-        if let Err(e) = std::fs::remove_file(&old) {
+    if old.exists() && std::fs::remove_file(&old).is_err() {
+        // Left over from an earlier update and still in use (an older instance is running).
+        // Windows can't delete it, but it can rename it: move it out of the way under a
+        // unique name; `cleanup_old` deletes it on a later start.
+        let parked = leftover_name(target);
+        if let Err(e) = std::fs::rename(&old, &parked) {
             let _ = std::fs::remove_file(&staged);
-            return Err(e).with_context(|| format!("removing {}", old.display()));
+            return Err(e).with_context(|| {
+                format!(
+                    "moving {} aside (close other running copies of the program and try again)",
+                    old.display()
+                )
+            });
         }
     }
     if let Err(e) = std::fs::rename(target, &old) {
@@ -204,6 +212,44 @@ pub fn replace_file(target: &Path, new_exe: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// A free name `<target>.old-<n>` for a leftover that is still in use.
+fn leftover_name(target: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    (0..)
+        .map(|n| with_suffix(target, &format!(".old-{stamp}-{n}")))
+        .find(|p| !p.exists())
+        .expect("some name is free")
+}
+
+/// All files an earlier update left behind next to `exe` (`.old` and `.old-*`).
+fn leftovers(exe: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (exe.parent(), exe.file_name()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}.old", name.to_string_lossy());
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy())
+                        .is_some_and(|n| n == prefix || n.starts_with(&format!("{prefix}-")))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Downloads, verifies and installs `rel` over the running program. Returns its path.
 pub fn install(rel: &Release) -> Result<PathBuf> {
     let exe = download(rel)?;
@@ -213,19 +259,21 @@ pub fn install(rel: &Release) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// Removes the `.old` file an earlier update left behind. The previous process may still be
-/// closing, so this retries for a few seconds in the background.
+/// Removes the files earlier updates left behind. The previous process may still be
+/// closing, so this retries for a few seconds in the background; files still in use stay
+/// until a later start.
 pub fn cleanup_old() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let old = with_suffix(&exe, ".old");
-    if !old.exists() {
+    let mut left = leftovers(&exe);
+    if left.is_empty() {
         return;
     }
     std::thread::spawn(move || {
         for _ in 0..20 {
-            if std::fs::remove_file(&old).is_ok() || !old.exists() {
+            left.retain(|p| std::fs::remove_file(p).is_err() && p.exists());
+            if left.is_empty() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(500));
@@ -316,6 +364,30 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"v3");
         assert_eq!(std::fs::read(dir.join("app.exe.old")).unwrap(), b"v2");
         assert!(!dir.join("app.exe.new").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn finds_leftovers_only() {
+        let dir = std::env::temp_dir().join(format!("t2c-leftovers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in [
+            "app.exe",
+            "app.exe.old",
+            "app.exe.old-1-0",
+            "app.exe.new",
+            "other.exe.old",
+        ] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let mut names: Vec<String> = leftovers(&dir.join("app.exe"))
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["app.exe.old", "app.exe.old-1-0"]);
+        let parked = leftover_name(&dir.join("app.exe"));
+        assert!(!parked.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

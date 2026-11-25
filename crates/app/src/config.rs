@@ -246,8 +246,13 @@ impl Config {
     }
 
     #[allow(dead_code)] // used by the settings window
+    /// The config as TOML, as `save` writes it (also used to notice unsaved changes).
+    pub fn to_text(&self) -> Result<String> {
+        toml::to_string_pretty(self).context("serializing config")
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
-        let text = toml::to_string_pretty(self).context("serializing config")?;
+        let text = self.to_text()?;
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
