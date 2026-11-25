@@ -13,7 +13,7 @@ path = "src/lib.rs"
 tast2controller-core = { path = "../core" }
 tast2controller-input = { path = "../input" }
 serde = { version = "1.0.210", features = ["derive"] }
-toml = "0.8.19"
+toml = "1.2.2"
 anyhow = "1.0.89"
 clap = { version = "4.5.20", features = ["derive"] }
 log = "0.4.22"
