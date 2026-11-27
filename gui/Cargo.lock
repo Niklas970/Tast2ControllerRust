@@ -3789,7 +3789,7 @@ dependencies = [
 
 [[package]]
 name = "tast2controller"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "tast2controller-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3825,7 +3825,7 @@ dependencies = [
 
 [[package]]
 name = "tast2controller-gui"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "log",
@@ -3837,7 +3837,7 @@ dependencies = [
 
 [[package]]
 name = "tast2controller-input"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
 ]
