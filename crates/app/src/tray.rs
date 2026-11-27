@@ -325,3 +325,56 @@ pub fn show_window(hwnd: isize) {
         SetForegroundWindow(hwnd);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// One instance only
+
+/// Held for the life of the program; a second start sees it and hands over instead.
+pub struct InstanceLock(windows_sys::Win32::Foundation::HANDLE);
+
+// The handle is only closed on drop; it is never used from two threads at once.
+unsafe impl Send for InstanceLock {}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+/// Claims the single-instance lock. `None` means another copy is already running.
+pub fn claim_single_instance() -> Option<InstanceLock> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let name = wide("Local\\Tast2ControllerRust.Instance");
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return Some(InstanceLock(handle)); // can't tell; don't block the start
+    }
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+        return None;
+    }
+    Some(InstanceLock(handle))
+}
+
+/// Asks the running copy to show its window (as a click on its tray icon would).
+/// Returns false if no running copy with a tray icon was found.
+pub fn activate_running() -> bool {
+    let class = wide("Tast2ControllerTray");
+    let hwnd = unsafe {
+        FindWindowExW(
+            HWND_MESSAGE,
+            std::ptr::null_mut(),
+            class.as_ptr(),
+            std::ptr::null(),
+        )
+    };
+    if hwnd.is_null() {
+        return false;
+    }
+    // the running copy may bring its window to the front
+    unsafe {
+        AllowSetForegroundWindow(u32::MAX);
+        PostMessageW(hwnd, WM_TRAY, 0, WM_LBUTTONUP as LPARAM) != 0
+    }
+}

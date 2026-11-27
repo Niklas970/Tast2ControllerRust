@@ -10,6 +10,11 @@ fn main() {
     #[cfg(windows)]
     {
         tast2controller::cli::detach_own_console();
+        // one window only: a second start shows the running one and quits
+        let Some(_lock) = tast2controller::tray::claim_single_instance() else {
+            tast2controller::tray::activate_running();
+            return;
+        };
         tast2controller::update::cleanup_old();
         ui::run();
     }
